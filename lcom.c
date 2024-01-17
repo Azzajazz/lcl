@@ -8,6 +8,8 @@
 #include <stdarg.h>
 #include <assert.h>
 
+/****************************** URGENT ******************************/
+// The *eatUntil* functions will hang if a TOKEN_EOF is found.
 
 
 //////////////
@@ -86,6 +88,14 @@ bool svEqualsCStr(String_View sv, char* cstr) {
     return cstr[sv.length] == '\0';
 }
 
+String_View svUntil(char delim, char* cstr) {
+    size_t length = 0;
+    for (char* p = cstr; *p && *p != delim; ++p) {
+        length++;
+    }
+    return (String_View){cstr, length};
+}
+
 
 
 ///////////////
@@ -100,58 +110,126 @@ typedef enum {
     TOKEN_LBRACE,
     TOKEN_RBRACE,
     TOKEN_DCOLON,
-    TOKEN_IDENT,
+    TOKEN_IDENT_OR_KEYWORD,
 } Token_Type;
 
 typedef struct {
     Token_Type type;
     String_View text;
+    size_t lineNum;
+    size_t charNum;
+    String_View line;
 } Token;
 
+typedef struct {
+    char* code;
+    char* fileName;
+    size_t lineNum;
+    size_t charNum;
+    String_View line;
+} Lexer;
+
+Lexer makeLexer(char* code, char* fileName) {
+    return (Lexer){
+        .code = code,
+        .fileName = fileName,
+        .lineNum = 1,
+        .charNum = 1,
+        .line = svUntil('\n', code)
+    };
+}
+
+void lexerAdvance(Lexer* lexer, size_t steps) {
+    for (size_t i = 0; i < steps; ++i) {
+        lexer->charNum++;
+        if (*lexer->code == '\n') {
+            lexer->lineNum++;
+            lexer->charNum = 1;
+            lexer->line = svUntil('\n', lexer->code + 1);
+        }
+        lexer->code++;
+    }
+}
+
+void lexerAdvanceLine(Lexer* lexer) {
+    while (*lexer->code && *lexer->code != '\n') {
+        lexer->code++;
+    }
+    lexer->lineNum++;
+    lexer->charNum = 1;
+}
+
 bool isLexemeTerminator(char c) {
-    return c == '('
+    return isspace(c)
+        || c == '\0'
+        || c == ','
+        || c == '('
         || c == ')'
         || c == '{'
         || c == '}'
         || c == ':';
 }
 
-Token getToken(char** input) {
-    while (isspace(**input)) (*input)++;
-    switch(**input) {
+Token getToken(Lexer* lexer) {
+    while (isspace(*lexer->code)) {
+        lexerAdvance(lexer, 1);
+    }
+
+    Token result;
+    result.lineNum = lexer->lineNum;
+    result.charNum = lexer->charNum;
+    result.line = lexer->line;
+    switch(*lexer->code) {
         case '\0':
-            return (Token){TOKEN_EOF, (String_View){*input, 0}};
+            result.type = TOKEN_EOF;
+            result.text = (String_View){lexer->code, 1};
+            lexerAdvance(lexer, 1);
+            break;
         case ',':
-            (*input)++;
-            return (Token){TOKEN_COMMA, (String_View){*input - 1, 1}};
+            result.type = TOKEN_COMMA;
+            result.text = (String_View){lexer->code, 1};
+            lexerAdvance(lexer, 1);
+            break;
         case '(':
-            (*input)++;
-            return (Token){TOKEN_LPAREN, (String_View){*input - 1, 1}};
+            result.type = TOKEN_LPAREN;
+            result.text = (String_View){lexer->code, 1};
+            lexerAdvance(lexer, 1);
+            break;
         case ')':
-            (*input)++;
-            return (Token){TOKEN_RPAREN, (String_View){*input - 1, 1}};
+            result.type = TOKEN_RPAREN;
+            result.text = (String_View){lexer->code, 1};
+            lexerAdvance(lexer, 1);
+            break;
         case '{':
-            (*input)++;
-            return (Token){TOKEN_LBRACE, (String_View){*input - 1, 1}};
+            result.type = TOKEN_LBRACE;
+            result.text = (String_View){lexer->code, 1};
+            lexerAdvance(lexer, 1);
+            break;
         case '}':
-            (*input)++;
-            return (Token){TOKEN_RBRACE, (String_View){*input - 1, 1}};
+            result.type = TOKEN_RBRACE;
+            result.text = (String_View){lexer->code, 1};
+            lexerAdvance(lexer, 1);
+            break;
         case ':': {
-            if ((*input)[1] == ':') {
-                *input += 2;
-                return (Token){TOKEN_DCOLON, (String_View){*input - 2, 2}};
+            if (lexer->code[1] == ':') {
+                result.type = TOKEN_DCOLON;
+                result.text = (String_View){lexer->code, 2};
+                lexerAdvance(lexer, 2);
             }
+            break;
         }
         default: {
             size_t identLength = 0;
-            while(!isLexemeTerminator((*input)[identLength])) {
+            while(!isLexemeTerminator(lexer->code[identLength])) {
                 identLength++;
             }
-            String_View text = {*input, identLength};
-            *input += identLength;
-            return (Token){TOKEN_IDENT, text};
+            result.type = TOKEN_IDENT_OR_KEYWORD;
+            result.text = (String_View){lexer->code, identLength};
+            lexerAdvance(lexer, identLength);
+            break;
         } 
     }
+    return result;
 }
 
 void printToken(Token token) {
@@ -159,6 +237,9 @@ void printToken(Token token) {
     switch (token.type) {
         case TOKEN_EOF:
             typeString = "EOF";
+            break;
+        case TOKEN_COMMA:
+            typeString = "COMMA";
             break;
         case TOKEN_LPAREN:
             typeString = "LPAREN";
@@ -175,7 +256,7 @@ void printToken(Token token) {
         case TOKEN_DCOLON:
             typeString = "DCOLON";
             break;
-        case TOKEN_IDENT:
+        case TOKEN_IDENT_OR_KEYWORD:
             typeString = "IDENT";
             break;
     }
@@ -187,6 +268,101 @@ void printToken(Token token) {
 ////////////////
 // Parser API //
 ////////////////
+
+typedef struct {
+    size_t lineNumStart;
+    size_t charNumStart;
+    String_View lineStart;
+    size_t lineNumEnd;
+    size_t charNumEnd;
+    String_View lineEnd;
+} Arrow_Span;
+
+void printArrows(unsigned indent, size_t start, size_t length) {
+    for (unsigned i = 0; i < indent; ++i) {
+        printf(" ");
+    }
+    for (size_t i = 0; i < start; ++i) {
+        printf(" ");
+    }
+    for (size_t i = 0; i < length; ++i) {
+        printf("^");
+    }
+    printf("\n");
+}
+
+void printArrowSpan(Arrow_Span span) {
+        if (span.lineNumStart == span.lineNumEnd) {
+            printf("  "SV_FMT"\n", SV_ARG(span.lineStart));
+            printArrows(2, span.charNumStart - 1, span.charNumEnd - span.charNumStart);
+        }
+        else {
+            printf("  Line %5zu: "SV_FMT"\n", span.lineNumStart, SV_ARG(span.lineStart));
+            printf("      ...");
+            printArrows(5, span.charNumStart - 1, span.lineStart.length - span.charNumStart);
+            printf("  Line %5zu: "SV_FMT"\n", span.lineNumEnd, SV_ARG(span.lineEnd));
+            printArrows(14, 0, span.charNumEnd - 1);
+        }
+}
+
+void printError(char* fileName, Arrow_Span span, char* msg, ...) {
+    printf("%s:%zu:%zu: error! ", fileName, span.lineNumStart, span.charNumStart);
+    va_list args;
+    va_start(args, msg);
+    vprintf(msg, args);
+    va_end(args);
+    printf(":\n");
+    printArrowSpan(span);
+    printf("\n");
+}
+
+// URGENT: 1
+Arrow_Span spanAndEatUntil(Lexer* lexer, Token token, Token_Type wanted) {
+    Arrow_Span span;
+    span.lineNumStart = token.lineNum;
+    span.charNumStart = token.charNum;
+    span.lineStart = token.line;
+    while (token.type != wanted) {
+        span.lineNumEnd = token.lineNum;
+        span.charNumEnd = token.charNum + token.text.length;
+        span.lineEnd = token.line;
+        token = getToken(lexer);
+    }
+    return span;
+}
+
+// URGENT: 1
+Arrow_Span spanAndEatUntilKeyword(Lexer* lexer, Token token, char* keyword) {
+    Arrow_Span span;
+    span.lineNumStart = token.lineNum;
+    span.charNumStart = token.charNum;
+    span.lineStart = token.line;
+    while (token.type != TOKEN_IDENT_OR_KEYWORD || !svEqualsCStr(token.text, keyword)) {
+        span.lineNumEnd = token.lineNum;
+        span.charNumEnd = token.charNum + token.text.length;
+        span.lineEnd = token.line;
+        token = getToken(lexer);
+    }
+    return span;
+}
+
+void eatUntil(Lexer* lexer, Token_Type wanted) {
+    Token token = getToken(lexer);
+    while (token.type != wanted) {
+        token = getToken(lexer);
+    }
+}
+
+Arrow_Span spanToken(Token token) {
+    return (Arrow_Span){
+        .lineNumStart = token.lineNum,
+        .charNumStart = token.charNum,
+        .lineStart = token.line,
+        .lineNumEnd = token.lineNum,
+        .charNumEnd = token.charNum + token.text.length,
+        .lineEnd = token.line,
+    };
+}
 
 enum Node_Type;
 union Node_Data;
@@ -226,7 +402,7 @@ typedef struct AST_Node {
     Node_Type type;
     Node_Data data;
 } AST_Node;
-
+    
 typedef struct {
     AST_Node* nodes;
     size_t length;
@@ -250,43 +426,64 @@ AST_Node* allocateNode(AST_Node_Arena* arena) {
     return arena->nodes + arena->length - 1;
 }
 
-AST_Node* parseArgList(AST_Node_Arena* arena, char** code) {
-    Token token = getToken(code);
-    assert(token.type == TOKEN_LPAREN);
+AST_Node* parseArgList(AST_Node_Arena* arena, Lexer* lexer, bool* success) {
+    Token token = getToken(lexer);
+    if (token.type != TOKEN_LPAREN) {
+        Arrow_Span span = spanAndEatUntil(lexer, token, TOKEN_LPAREN);
+        printError(lexer->fileName, span, "Junk between \"func\" keyword and argument list");
+        *success = false;
+    }
 
-    token = getToken(code);
+    token = getToken(lexer);
     if (token.type == TOKEN_RPAREN) {
         return NULL;
     }
-    assert(token.type == TOKEN_IDENT);
+    assert(token.type == TOKEN_IDENT_OR_KEYWORD);
+    if (token.type != TOKEN_IDENT_OR_KEYWORD) {
+        printError(lexer->fileName, spanToken(token), "Expected identifier, got \""SV_FMT"\"", SV_ARG(token.text));
+        eatUntil(lexer, TOKEN_IDENT_OR_KEYWORD);
+        *success = false;
+    }
     AST_Node* head = allocateNode(arena);
     head->type = NODE_ARG_LIST;
     head->data.arg = token.text;
     head->data.nextArg = NULL;
     AST_Node* curr = head;
 
-    token = getToken(code);
+    token = getToken(lexer);
     while (token.type != TOKEN_RPAREN) {
-        assert(token.type == TOKEN_COMMA);
-        token = getToken(code);
-        assert(token.type == TOKEN_IDENT);
+        if (token.type != TOKEN_COMMA) {
+            printError(lexer->fileName, spanToken(token), "Expected \",\", got \""SV_FMT"\"", SV_ARG(token.text));
+            eatUntil(lexer, TOKEN_COMMA);
+            *success = false;
+        }
+        token = getToken(lexer);
+        if (token.type != TOKEN_IDENT_OR_KEYWORD) {
+            printError(lexer->fileName, spanToken(token), "Expected identifier, got \""SV_FMT"\"", SV_ARG(token.text));
+            eatUntil(lexer, TOKEN_IDENT_OR_KEYWORD);
+            *success = false;
+        }
         curr->data.nextArg = allocateNode(arena);
         curr = curr->data.nextArg;
         curr->type = NODE_ARG_LIST;
         curr->data.arg = token.text;
         curr->data.nextArg = NULL;
-        token = getToken(code);
+        token = getToken(lexer);
     }
     return head;
 }
 
-AST_Node* parseScope(AST_Node_Arena* arena, char** code) {
-    Token token = getToken(code);
-    assert(token.type == TOKEN_LBRACE);
+AST_Node* parseScope(AST_Node_Arena* arena, Lexer* lexer, bool* success) {
+    Token token = getToken(lexer);
+    if (token.type != TOKEN_LBRACE) {
+        printError(lexer->fileName, spanToken(token), "Expected \"{\", got \""SV_FMT"\"", SV_ARG(token.text));
+        eatUntil(lexer, TOKEN_LBRACE);
+        *success = false;
+    }
 
+    //TEMPORARY
     //TODO: Parse expression list
-
-    token = getToken(code);
+    token = getToken(lexer);
     assert(token.type == TOKEN_RBRACE);
 
     AST_Node* node = allocateNode(arena);
@@ -295,20 +492,32 @@ AST_Node* parseScope(AST_Node_Arena* arena, char** code) {
     return node;
 }
 
-AST_Node* parseFunction(AST_Node_Arena* arena, char** code) {
-    Token token = getToken(code);
-    assert(token.type == TOKEN_IDENT);
+AST_Node* parseFunction(AST_Node_Arena* arena, Lexer* lexer, bool* success) {
+    Token token = getToken(lexer);
+    if (token.type != TOKEN_IDENT_OR_KEYWORD) {
+        printError(lexer->fileName, spanToken(token), "Expected identifier, but got \""SV_FMT"\"", SV_ARG(token.text));
+        eatUntil(lexer, TOKEN_IDENT_OR_KEYWORD);
+        *success = false;
+    }
     String_View name = token.text;
 
-    token = getToken(code);
-    assert(token.type == TOKEN_DCOLON);
+    token = getToken(lexer);
+    if (token.type != TOKEN_DCOLON) {
+        Arrow_Span span = spanAndEatUntil(lexer, token, TOKEN_DCOLON); 
+        printError(lexer->fileName, span, "Junk between function name and \"::\"");
+        *success = false;
+    }
 
-    token = getToken(code);
-    assert(token.type == TOKEN_IDENT && svEqualsCStr(token.text, "func"));
+    token = getToken(lexer);
+    if (token.type != TOKEN_IDENT_OR_KEYWORD || !svEqualsCStr(token.text, "func")) {
+        Arrow_Span span = spanAndEatUntilKeyword(lexer, token, "func");
+        printError(lexer->fileName, span, "Junk between \"::\" and \"func\" keyword");
+        *success = false;
+    }
 
-    AST_Node* args = parseArgList(arena, code);
+    AST_Node* args = parseArgList(arena, lexer, success);
 
-    AST_Node* body = parseScope(arena, code);
+    AST_Node* body = parseScope(arena, lexer, success);
 
     AST_Node* node = allocateNode(arena);
     node->type = NODE_FUNCTION;
@@ -398,9 +607,16 @@ void printNode(AST_Node node) {
 // Compile C code to executable
 
 int main() {
-    char* code = readEntireFile("simple.lcl");
+    char* fileName = "simple.lcl";
+    char* code = readEntireFile(fileName);
+    Lexer lexer = makeLexer(code, fileName);
+//    Token token = getToken(&lexer);
+//    while (token.type != TOKEN_EOF) {
+//        printToken(token);
+//        token = getToken(&lexer);
+//    }
     AST_Node_Arena arena = makeNodeArena(10);
-    AST_Node* func = parseFunction(&arena, &code);
-    printNode(*func);
-    return 0;
+    bool success = true;
+    AST_Node* func = parseFunction(&arena, &lexer, &success);
+//    printNode(*func);
 }
