@@ -2,3 +2,6 @@ build
 *.obj
 *.exe
 *.swp
+
+# VS is used only for debugging. The solution file is not complete.
+*.sln
