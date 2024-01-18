@@ -5,3 +5,4 @@ build
 
 # VS is used only for debugging. The solution file is not complete.
 *.sln
+.vs
