@@ -60,8 +60,9 @@ long getFileSize(FILE* file) {
 char* readEntireFile(char* filePath) {
     FILE* file = tryFOpen(filePath, "rb");
     long fileSize = getFileSize(file);
-    char* contents = malloc(fileSize);
+    char* contents = malloc(fileSize + 1);
     tryFRead(contents, 1, fileSize, file);
+    contents[fileSize] = '\0';
     return contents;
 }
 
@@ -141,6 +142,8 @@ typedef struct {
     size_t lineNum;
     size_t charNum;
     String_View line;
+    //TODO: This is only used for getToken right now. Do we really need it?
+    size_t consumed; // The number of characters consumed to retrieve this token.
 } Token;
 
 typedef struct {
@@ -192,6 +195,7 @@ bool isLexemeTerminator(char c) {
         || c == ':';
 }
 
+//TODO: Would this be cleaner if it returned a MAYBE(Token) and we removed TOKEN_EOF?
 Token getToken(Lexer* lexer) {
     while (isspace(*lexer->code)) {
         lexerAdvance(lexer, 1);
@@ -252,6 +256,12 @@ Token getToken(Lexer* lexer) {
         } 
     }
     return result;
+}
+
+Token peekToken(Lexer* lexer) {
+    Lexer newLexer = *lexer;
+    Token token = getToken(&newLexer);
+    return token;
 }
 
 void printToken(Token token) {
@@ -483,6 +493,29 @@ typedef struct {
     size_t capacity;
 } AST_Node_Arena;
 
+typedef struct {
+    AST_Node** functions;
+    size_t length;
+    size_t capacity;
+} Function_Array;
+
+Function_Array makeFunctionArray(size_t capacity) {
+    return (Function_Array){
+        .functions = malloc(capacity * sizeof(AST_Node*)),
+        .length = 0,
+        .capacity = capacity,
+    };
+}
+
+void pushFunction(Function_Array* array, AST_Node* function) {
+    if (array->length == array->capacity) {
+        array->capacity *= 2;
+        array->functions = realloc(array->functions, array->capacity * sizeof(AST_Node*));
+    }
+    array->functions[array->length] = function;
+    array->length++;
+}
+
 AST_Node_Arena makeNodeArena(size_t capacity) {
     return (AST_Node_Arena){
         .nodes = malloc(capacity * sizeof(AST_Node)),
@@ -494,7 +527,7 @@ AST_Node_Arena makeNodeArena(size_t capacity) {
 AST_Node* allocateNode(AST_Node_Arena* arena) {
     if (arena->length == arena->capacity) {
         arena->capacity *= 2;
-        arena->nodes = realloc(arena->nodes, arena->capacity);
+        arena->nodes = realloc(arena->nodes, arena->capacity * sizeof(AST_Node));
     }
     arena->length++;
     return arena->nodes + arena->length - 1;
@@ -618,6 +651,23 @@ MAYBE_PTR(AST_Node) parseFunction(AST_Node_Arena* arena, Lexer* lexer) {
     return result;
 }
 
+//Returns true if the program is valid, false otherwise.
+bool parseProgram(Function_Array* functions, AST_Node_Arena* arena, Lexer* lexer) {
+    bool result = true;
+    Token token = peekToken(lexer);
+    while (token.type != TOKEN_EOF) {
+        MAYBE_PTR(AST_Node) function = parseFunction(arena, lexer);
+        if (function.exists) {
+            pushFunction(functions, function.inner);
+        }
+        else {
+            result = false;
+        }
+        token = peekToken(lexer);
+    }
+    return result;
+}
+
 printIndented(unsigned indent, char* fmt, ...) {
     va_list args;
     for (unsigned i = 0; i < indent; ++i) {
@@ -701,12 +751,13 @@ int main() {
     char* fileName = "simple.lcl";
     char* code = readEntireFile(fileName);
     Lexer lexer = makeLexer(code, fileName);
-//    Token token = getToken(&lexer);
-//    while (token.type != TOKEN_EOF) {
-//        printToken(token);
-//        token = getToken(&lexer);
-//    }
     AST_Node_Arena arena = makeNodeArena(10);
-    MAYBE_PTR(AST_Node) func = parseFunction(&arena, &lexer);
-//    printNode(*func);
+    Function_Array functions = makeFunctionArray(10);
+    bool success = parseProgram(&functions, &arena, &lexer);
+    if (success) {
+        for (size_t i = 0; i < functions.length; ++i) {
+            printNode(*functions.functions[i]);
+        }
+    }
+    return 0;
 }
