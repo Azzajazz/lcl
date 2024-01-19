@@ -475,6 +475,7 @@ typedef struct AST_Node {
     Node_Type type;
     Node_Data data;
 } AST_Node;
+MAYBE_PTR_DEF(AST_Node);
     
 typedef struct {
     AST_Node* nodes;
@@ -499,39 +500,44 @@ AST_Node* allocateNode(AST_Node_Arena* arena) {
     return arena->nodes + arena->length - 1;
 }
 
-AST_Node* parseArgList(AST_Node_Arena* arena, Lexer* lexer, bool* success) {
+MAYBE_PTR(AST_Node) parseArgList(AST_Node_Arena* arena, Lexer* lexer) {
+    MAYBE_PTR(AST_Node) result;
+    result.exists = true;
     Token token = getToken(lexer);
     if (token.type != TOKEN_LPAREN) {
         reportScopeAndEatUntil(lexer, scopeToken(token), token, TOKEN_LPAREN,
                 "Junk between \"func\" keyword and argument list",
                 "Expected \"(\" after \"func\" keyword");
-        *success = false;
+        result.exists = false;
     }
 
     token = getToken(lexer);
     if (token.type == TOKEN_RPAREN) {
-        return NULL;
+        result.inner = NULL;
+        return result;
     }
     if (token.type != TOKEN_IDENT_OR_KEYWORD) {
         reportAndEatUntil(lexer, scopeToken(token), TOKEN_IDENT_OR_KEYWORD, "Expected identifier, got \""SV_FMT"\"", SV_ARG(token.text));
-        *success = false;
+        result.exists = false;
     }
-    AST_Node* head = allocateNode(arena);
-    head->type = NODE_ARG_LIST;
-    head->data.arg = token.text;
-    head->data.nextArg = NULL;
-    AST_Node* curr = head;
+
+    //OPTIMIZATION: If result.exists is false, we could avoid some allocations here.
+    result.inner = allocateNode(arena);
+    result.inner->type = NODE_ARG_LIST;
+    result.inner->data.arg = token.text;
+    result.inner->data.nextArg = NULL;
+    AST_Node* curr = result.inner;
 
     token = getToken(lexer);
     while (token.type != TOKEN_RPAREN) {
         if (token.type != TOKEN_COMMA) {
             reportAndEatUntil(lexer, scopeToken(token), TOKEN_COMMA, "Expected \",\", got \""SV_FMT"\"", SV_ARG(token.text));
-            *success = false;
+            result.exists = false;
         }
         token = getToken(lexer);
         if (token.type != TOKEN_IDENT_OR_KEYWORD) {
             reportAndEatUntil(lexer, scopeToken(token), TOKEN_IDENT_OR_KEYWORD, "Expected identifier, got \""SV_FMT"\"", SV_ARG(token.text));
-            *success = false;
+            result.exists = false;
         }
         curr->data.nextArg = allocateNode(arena);
         curr = curr->data.nextArg;
@@ -540,14 +546,16 @@ AST_Node* parseArgList(AST_Node_Arena* arena, Lexer* lexer, bool* success) {
         curr->data.nextArg = NULL;
         token = getToken(lexer);
     }
-    return head;
+    return result;
 }
 
-AST_Node* parseScope(AST_Node_Arena* arena, Lexer* lexer, bool* success) {
+MAYBE_PTR(AST_Node) parseScope(AST_Node_Arena* arena, Lexer* lexer) {
+    MAYBE_PTR(AST_Node) result;
+    result.exists = true;
     Token token = getToken(lexer);
     if (token.type != TOKEN_LBRACE) {
         reportAndEatUntil(lexer, scopeToken(token), TOKEN_LBRACE, "Expected \"{\", got \""SV_FMT"\"", SV_ARG(token.text));
-        *success = false;
+        result.exists = false;
     }
 
     //TEMPORARY
@@ -555,17 +563,21 @@ AST_Node* parseScope(AST_Node_Arena* arena, Lexer* lexer, bool* success) {
     token = getToken(lexer);
     assert(token.type == TOKEN_RBRACE);
 
-    AST_Node* node = allocateNode(arena);
-    node->type = NODE_SCOPE;
-    node->data.exprs = NULL;
-    return node;
+    if (result.exists) {
+        result.inner = allocateNode(arena);
+        result.inner->type = NODE_SCOPE;
+        result.inner->data.exprs = NULL;
+    }
+    return result;
 }
 
-AST_Node* parseFunction(AST_Node_Arena* arena, Lexer* lexer, bool* success) {
+MAYBE_PTR(AST_Node) parseFunction(AST_Node_Arena* arena, Lexer* lexer) {
+    MAYBE_PTR(AST_Node) result;
+    result.exists = true;
     Token token = getToken(lexer);
     if (token.type != TOKEN_IDENT_OR_KEYWORD) {
         reportAndEatUntil(lexer, scopeToken(token), TOKEN_IDENT_OR_KEYWORD, "Expected identifier, but got \""SV_FMT"\"", SV_ARG(token.text));
-        *success = false;
+        result.exists = false;
     }
     String_View name = token.text;
 
@@ -573,29 +585,37 @@ AST_Node* parseFunction(AST_Node_Arena* arena, Lexer* lexer, bool* success) {
     if (token.type != TOKEN_DCOLON) {
         //TODO: This could be made better if we supported string formatting
         reportScopeAndEatUntil(lexer, scopeToken(token), token, TOKEN_DCOLON,
-                "Expected \"::\" after function identifier",
-                "Junk between function name and \"::\"");
-        *success = false;
+                "Junk between function name and \"::\"",
+                "Expected \"::\" after function identifier");
+        result.exists = false;
     }
 
     token = getToken(lexer);
     if (token.type != TOKEN_IDENT_OR_KEYWORD || !svEqualsCStr(token.text, "func")) {
         reportScopeAndEatUntilKeyword(lexer, scopeToken(token), token, "func",
-                "Expected \"func\" keyword after \"::\"",
-                "Junk between \"::\" and \"func\" keyword");
-        *success = false;
+                "Junk between \"::\" and \"func\" keyword",
+                "Expected \"func\" keyword after \"::\"");
+        result.exists = false;
     }
 
-    AST_Node* args = parseArgList(arena, lexer, success);
+    MAYBE_PTR(AST_Node) args = parseArgList(arena, lexer);
+    if (!args.exists) {
+        result.exists = false;
+    }
 
-    AST_Node* body = parseScope(arena, lexer, success);
+    MAYBE_PTR(AST_Node) body = parseScope(arena, lexer);
+    if (!body.exists) {
+        result.exists = false;
+    }
 
-    AST_Node* node = allocateNode(arena);
-    node->type = NODE_FUNCTION;
-    node->data.name = name;
-    node->data.args = args;
-    node->data.body = body;
-    return node;
+    if (result.exists) {
+        result.inner = allocateNode(arena);
+        result.inner->type = NODE_FUNCTION;
+        result.inner->data.name = name;
+        result.inner->data.args = args.inner;
+        result.inner->data.body = body.inner;
+    }
+    return result;
 }
 
 printIndented(unsigned indent, char* fmt, ...) {
@@ -687,7 +707,6 @@ int main() {
 //        token = getToken(&lexer);
 //    }
     AST_Node_Arena arena = makeNodeArena(10);
-    bool success = true;
-    AST_Node* func = parseFunction(&arena, &lexer, &success);
+    MAYBE_PTR(AST_Node) func = parseFunction(&arena, &lexer);
 //    printNode(*func);
 }
