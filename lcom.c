@@ -8,8 +8,8 @@
 #include <stdarg.h>
 #include <assert.h>
 
-/****************************** URGENT ******************************/
-// The *eatUntil* functions will hang if a TOKEN_EOF is found.
+/****************************** IMPORTANT ******************************/
+// 1: The *eatUntil* functions will hang if a TOKEN_EOF is found.
 
 
 //////////////
@@ -64,6 +64,28 @@ char* readEntireFile(char* filePath) {
     tryFRead(contents, 1, fileSize, file);
     return contents;
 }
+
+
+
+///////////////
+// Maybe API //
+///////////////
+
+#define MAYBE_DEF(type) \
+    typedef struct {    \
+        bool exists;    \
+        type inner;     \
+    } _Maybe_##type
+
+#define MAYBE_PTR_DEF(type) \
+    typedef struct {        \
+        bool exists;        \
+        type* inner;        \
+    } _Maybe_Ptr_##type
+
+#define MAYBE(type) _Maybe_##type
+
+#define MAYBE_PTR(type) _Maybe_Ptr_##type
 
 
 
@@ -276,7 +298,19 @@ typedef struct {
     size_t lineNumEnd;
     size_t charNumEnd;
     String_View lineEnd;
-} Arrow_Span;
+} Lex_Scope;
+MAYBE_DEF(Lex_Scope);
+
+Lex_Scope scopeToken(Token token) {
+    return (Lex_Scope){
+        .lineNumStart = token.lineNum,
+        .charNumStart = token.charNum,
+        .lineStart = token.line,
+        .lineNumEnd = token.lineNum,
+        .charNumEnd = token.charNum + token.text.length,
+        .lineEnd = token.line,
+    };
+}
 
 void printArrows(unsigned indent, size_t start, size_t length) {
     for (unsigned i = 0; i < indent; ++i) {
@@ -291,77 +325,116 @@ void printArrows(unsigned indent, size_t start, size_t length) {
     printf("\n");
 }
 
-void printArrowSpan(Arrow_Span span) {
-        if (span.lineNumStart == span.lineNumEnd) {
-            printf("  "SV_FMT"\n", SV_ARG(span.lineStart));
-            printArrows(2, span.charNumStart - 1, span.charNumEnd - span.charNumStart);
+void printArrowSpan(Lex_Scope scope) {
+        if (scope.lineNumStart == scope.lineNumEnd) {
+            printf("  "SV_FMT"\n", SV_ARG(scope.lineStart));
+            printArrows(2, scope.charNumStart - 1, scope.charNumEnd - scope.charNumStart);
         }
         else {
-            printf("  Line %5zu: "SV_FMT"\n", span.lineNumStart, SV_ARG(span.lineStart));
+            printf("  Line %5zu: "SV_FMT"\n", scope.lineNumStart, SV_ARG(scope.lineStart));
             printf("      ...");
-            printArrows(5, span.charNumStart - 1, span.lineStart.length - span.charNumStart);
-            printf("  Line %5zu: "SV_FMT"\n", span.lineNumEnd, SV_ARG(span.lineEnd));
-            printArrows(14, 0, span.charNumEnd - 1);
+            printArrows(5, scope.charNumStart - 1, scope.lineStart.length - scope.charNumStart);
+            printf("  Line %5zu: "SV_FMT"\n", scope.lineNumEnd, SV_ARG(scope.lineEnd));
+            printArrows(14, 0, scope.charNumEnd - 1);
         }
 }
 
-void printError(char* fileName, Arrow_Span span, char* msg, ...) {
-    printf("%s:%zu:%zu: error! ", fileName, span.lineNumStart, span.charNumStart);
-    va_list args;
-    va_start(args, msg);
+// IMPORTANT: 1
+MAYBE(Lex_Scope) scopeAndEatUntil(Lexer* lexer, Token token, Token_Type wanted) {
+    MAYBE(Lex_Scope) result;
+    result.exists = true;
+    result.inner.lineNumStart = token.lineNum;
+    result.inner.charNumStart = token.charNum;
+    result.inner.lineStart = token.line;
+    while (token.type != wanted) {
+        if (token.type == TOKEN_EOF) {
+            result.exists = false;
+            break;
+        }
+        result.inner.lineNumEnd = token.lineNum;
+        result.inner.charNumEnd = token.charNum + token.text.length;
+        result.inner.lineEnd = token.line;
+        token = getToken(lexer);
+    }
+    return result;
+}
+
+// IMPORTANT: 1
+MAYBE(Lex_Scope) scopeAndEatUntilKeyword(Lexer* lexer, Token token, char* keyword) {
+    MAYBE(Lex_Scope) result;
+    result.exists = true;
+    result.inner.lineNumStart = token.lineNum;
+    result.inner.charNumStart = token.charNum;
+    result.inner.lineStart = token.line;
+    while (token.type != TOKEN_IDENT_OR_KEYWORD || !svEqualsCStr(token.text, keyword)) {
+        if (token.type == TOKEN_EOF) {
+            result.exists = false;
+            break;
+        }
+        result.inner.lineNumEnd = token.lineNum;
+        result.inner.charNumEnd = token.charNum + token.text.length;
+        result.inner.lineEnd = token.line;
+        token = getToken(lexer);
+    }
+    return result;
+}
+
+// Returns true if token of type wanted is found, false if EOF is found.
+bool eatUntil(Lexer* lexer, Token_Type wanted) {
+    Token token = getToken(lexer);
+    size_t lineNumStart = token.lineNum;
+    while (token.type != wanted) {
+        if (token.type == TOKEN_EOF) {
+            return false;
+        }
+        token = getToken(lexer);
+    }
+    return true;
+}
+
+void vPrintError(char* fileName, Lex_Scope scope, char* msg, va_list args) {
+    printf("%s:%zu:%zu: error! ", fileName, scope.lineNumStart, scope.charNumStart);
     vprintf(msg, args);
-    va_end(args);
     printf(":\n");
-    printArrowSpan(span);
+    printArrowSpan(scope);
     printf("\n");
 }
 
-// URGENT: 1
-Arrow_Span spanAndEatUntil(Lexer* lexer, Token token, Token_Type wanted) {
-    Arrow_Span span;
-    span.lineNumStart = token.lineNum;
-    span.charNumStart = token.charNum;
-    span.lineStart = token.line;
-    while (token.type != wanted) {
-        span.lineNumEnd = token.lineNum;
-        span.charNumEnd = token.charNum + token.text.length;
-        span.lineEnd = token.line;
-        token = getToken(lexer);
-    }
-    return span;
+void printError(char* fileName, Lex_Scope scope, char* msg, ...) {
+    va_list args;
+    va_start(args, msg);
+    vPrintError(fileName, scope, msg, args);
+    va_end(args);
 }
 
-// URGENT: 1
-Arrow_Span spanAndEatUntilKeyword(Lexer* lexer, Token token, char* keyword) {
-    Arrow_Span span;
-    span.lineNumStart = token.lineNum;
-    span.charNumStart = token.charNum;
-    span.lineStart = token.line;
-    while (token.type != TOKEN_IDENT_OR_KEYWORD || !svEqualsCStr(token.text, keyword)) {
-        span.lineNumEnd = token.lineNum;
-        span.charNumEnd = token.charNum + token.text.length;
-        span.lineEnd = token.line;
-        token = getToken(lexer);
-    }
-    return span;
-}
-
-void eatUntil(Lexer* lexer, Token_Type wanted) {
-    Token token = getToken(lexer);
-    while (token.type != wanted) {
-        token = getToken(lexer);
+void reportAndEatUntil(Lexer* lexer, Lex_Scope scope, Token_Type wanted, char* msg, ...) {
+    va_list args;
+    va_start(args, msg);
+    vPrintError(lexer->fileName, scope, msg, args);
+    va_end(args);
+    bool found = eatUntil(lexer, wanted);
+    if (!found) {
+        exit(1);
     }
 }
 
-Arrow_Span spanToken(Token token) {
-    return (Arrow_Span){
-        .lineNumStart = token.lineNum,
-        .charNumStart = token.charNum,
-        .lineStart = token.line,
-        .lineNumEnd = token.lineNum,
-        .charNumEnd = token.charNum + token.text.length,
-        .lineEnd = token.line,
-    };
+//TODO: Can we support string formatting here?
+void reportScopeAndEatUntil(Lexer* lexer, Lex_Scope scope, Token token, Token_Type wanted, char* msgFound, char* msgNotFound) {
+    MAYBE(Lex_Scope) eatScope = scopeAndEatUntil(lexer, token, wanted);
+    if (!eatScope.exists) {
+       printError(lexer->fileName, scope, msgNotFound); 
+       exit(1);
+    }
+    printError(lexer->fileName, eatScope.inner, msgFound);
+}
+
+void reportScopeAndEatUntilKeyword(Lexer* lexer, Lex_Scope scope, Token token, char* wanted, char* msgFound, char* msgNotFound) {
+    MAYBE(Lex_Scope) eatScope = scopeAndEatUntilKeyword(lexer, token, wanted);
+    if (!eatScope.exists) {
+       printError(lexer->fileName, scope, msgNotFound); 
+       exit(1);
+    }
+    printError(lexer->fileName, eatScope.inner, msgFound);
 }
 
 enum Node_Type;
@@ -429,8 +502,9 @@ AST_Node* allocateNode(AST_Node_Arena* arena) {
 AST_Node* parseArgList(AST_Node_Arena* arena, Lexer* lexer, bool* success) {
     Token token = getToken(lexer);
     if (token.type != TOKEN_LPAREN) {
-        Arrow_Span span = spanAndEatUntil(lexer, token, TOKEN_LPAREN);
-        printError(lexer->fileName, span, "Junk between \"func\" keyword and argument list");
+        reportScopeAndEatUntil(lexer, scopeToken(token), token, TOKEN_LPAREN,
+                "Junk between \"func\" keyword and argument list",
+                "Expected \"(\" after \"func\" keyword");
         *success = false;
     }
 
@@ -438,10 +512,8 @@ AST_Node* parseArgList(AST_Node_Arena* arena, Lexer* lexer, bool* success) {
     if (token.type == TOKEN_RPAREN) {
         return NULL;
     }
-    assert(token.type == TOKEN_IDENT_OR_KEYWORD);
     if (token.type != TOKEN_IDENT_OR_KEYWORD) {
-        printError(lexer->fileName, spanToken(token), "Expected identifier, got \""SV_FMT"\"", SV_ARG(token.text));
-        eatUntil(lexer, TOKEN_IDENT_OR_KEYWORD);
+        reportAndEatUntil(lexer, scopeToken(token), TOKEN_IDENT_OR_KEYWORD, "Expected identifier, got \""SV_FMT"\"", SV_ARG(token.text));
         *success = false;
     }
     AST_Node* head = allocateNode(arena);
@@ -453,14 +525,12 @@ AST_Node* parseArgList(AST_Node_Arena* arena, Lexer* lexer, bool* success) {
     token = getToken(lexer);
     while (token.type != TOKEN_RPAREN) {
         if (token.type != TOKEN_COMMA) {
-            printError(lexer->fileName, spanToken(token), "Expected \",\", got \""SV_FMT"\"", SV_ARG(token.text));
-            eatUntil(lexer, TOKEN_COMMA);
+            reportAndEatUntil(lexer, scopeToken(token), TOKEN_COMMA, "Expected \",\", got \""SV_FMT"\"", SV_ARG(token.text));
             *success = false;
         }
         token = getToken(lexer);
         if (token.type != TOKEN_IDENT_OR_KEYWORD) {
-            printError(lexer->fileName, spanToken(token), "Expected identifier, got \""SV_FMT"\"", SV_ARG(token.text));
-            eatUntil(lexer, TOKEN_IDENT_OR_KEYWORD);
+            reportAndEatUntil(lexer, scopeToken(token), TOKEN_IDENT_OR_KEYWORD, "Expected identifier, got \""SV_FMT"\"", SV_ARG(token.text));
             *success = false;
         }
         curr->data.nextArg = allocateNode(arena);
@@ -476,8 +546,7 @@ AST_Node* parseArgList(AST_Node_Arena* arena, Lexer* lexer, bool* success) {
 AST_Node* parseScope(AST_Node_Arena* arena, Lexer* lexer, bool* success) {
     Token token = getToken(lexer);
     if (token.type != TOKEN_LBRACE) {
-        printError(lexer->fileName, spanToken(token), "Expected \"{\", got \""SV_FMT"\"", SV_ARG(token.text));
-        eatUntil(lexer, TOKEN_LBRACE);
+        reportAndEatUntil(lexer, scopeToken(token), TOKEN_LBRACE, "Expected \"{\", got \""SV_FMT"\"", SV_ARG(token.text));
         *success = false;
     }
 
@@ -495,23 +564,25 @@ AST_Node* parseScope(AST_Node_Arena* arena, Lexer* lexer, bool* success) {
 AST_Node* parseFunction(AST_Node_Arena* arena, Lexer* lexer, bool* success) {
     Token token = getToken(lexer);
     if (token.type != TOKEN_IDENT_OR_KEYWORD) {
-        printError(lexer->fileName, spanToken(token), "Expected identifier, but got \""SV_FMT"\"", SV_ARG(token.text));
-        eatUntil(lexer, TOKEN_IDENT_OR_KEYWORD);
+        reportAndEatUntil(lexer, scopeToken(token), TOKEN_IDENT_OR_KEYWORD, "Expected identifier, but got \""SV_FMT"\"", SV_ARG(token.text));
         *success = false;
     }
     String_View name = token.text;
 
     token = getToken(lexer);
     if (token.type != TOKEN_DCOLON) {
-        Arrow_Span span = spanAndEatUntil(lexer, token, TOKEN_DCOLON); 
-        printError(lexer->fileName, span, "Junk between function name and \"::\"");
+        //TODO: This could be made better if we supported string formatting
+        reportScopeAndEatUntil(lexer, scopeToken(token), token, TOKEN_DCOLON,
+                "Expected \"::\" after function identifier",
+                "Junk between function name and \"::\"");
         *success = false;
     }
 
     token = getToken(lexer);
     if (token.type != TOKEN_IDENT_OR_KEYWORD || !svEqualsCStr(token.text, "func")) {
-        Arrow_Span span = spanAndEatUntilKeyword(lexer, token, "func");
-        printError(lexer->fileName, span, "Junk between \"::\" and \"func\" keyword");
+        reportScopeAndEatUntilKeyword(lexer, scopeToken(token), token, "func",
+                "Expected \"func\" keyword after \"::\"",
+                "Junk between \"::\" and \"func\" keyword");
         *success = false;
     }
 
