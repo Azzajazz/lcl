@@ -9,7 +9,7 @@
 #include <assert.h>
 
 /****************************** IMPORTANT ******************************/
-// 1: The *eatUntil* functions will hang if a TOKEN_EOF is found.
+// 1: In the middle of refactoring and cleaning up error reporting. Next is parseArgList
 
 
 //////////////
@@ -88,7 +88,7 @@ char* readEntireFile(char* filePath) {
 
 #define MAYBE_PTR(type) _Maybe_Ptr_##type
 
-
+MAYBE_DEF(int);
 
 /////////////////////
 // String View API //
@@ -119,7 +119,34 @@ String_View svUntil(char delim, char* cstr) {
     return (String_View){cstr, length};
 }
 
+MAYBE(int) svParseInt(String_View sv) {
+    MAYBE(int) result;
+    result.exists = false;
+    result.inner = 0;
+    if (sv.length == 0) {
+        return result;
+    }
 
+    bool negative = false;
+    size_t svIndex = 0;
+    if (*sv.start == '-') {
+        negative = true;
+        svIndex++;
+    }
+    else if (*sv.start == '+') {
+        svIndex++;
+    }
+
+    for (; svIndex < sv.length; ++svIndex) {
+        if (!isdigit(sv.start[svIndex])) {
+            return result;
+        }
+        result.inner *= 10;
+        result.inner += sv.start[svIndex] - '0';
+    }
+    result.exists = true;
+    return result;
+}
 
 ///////////////
 // Lexer API //
@@ -145,6 +172,7 @@ typedef struct {
     //TODO: This is only used for getToken right now. Do we really need it?
     size_t consumed; // The number of characters consumed to retrieve this token.
 } Token;
+MAYBE_DEF(Token);
 
 typedef struct {
     char* code;
@@ -174,14 +202,6 @@ void lexerAdvance(Lexer* lexer, size_t steps) {
         }
         lexer->code++;
     }
-}
-
-void lexerAdvanceLine(Lexer* lexer) {
-    while (*lexer->code && *lexer->code != '\n') {
-        lexer->code++;
-    }
-    lexer->lineNum++;
-    lexer->charNum = 1;
 }
 
 bool isLexemeTerminator(char c) {
@@ -309,7 +329,38 @@ typedef struct {
     size_t charNumEnd;
     String_View lineEnd;
 } Lex_Scope;
-MAYBE_DEF(Lex_Scope);
+
+void printScope(Lex_Scope scope) {
+    if (scope.lineNumStart == scope.lineNumEnd) {
+        printf("  "SV_FMT"\n", SV_ARG(scope.lineStart));
+        printf("  ");
+        // This loop starts at one since the charNums in scopes are 1-indexed.
+        for (size_t i = 1; i < scope.charNumStart; ++i) {
+            printf(" ");
+        }
+        for (size_t i = 0; i < scope.charNumEnd - scope.charNumStart; ++i) {
+            printf("^");
+        }
+    }
+    else {
+        printf("  Line %5zu: "SV_FMT"\n", scope.lineNumStart, SV_ARG(scope.lineStart));
+        printf("   ...         ");
+        // This loop starts at one since the charNums in scopes are 1-indexed.
+        for (size_t i = 1; i < scope.charNumStart; ++i) {
+            printf(" ");
+        }
+        for (size_t i = scope.charNumStart; i < scope.lineStart.length; ++i) {
+            printf("^");
+        }
+        printf("  Line %5zu: "SV_FMT"\n", scope.lineNumStart, SV_ARG(scope.lineStart));
+        printf("               ");
+        // This loop starts at one since the charNums in scopes are 1-indexed.
+        for (size_t i = 1; i < scope.charNumEnd; ++i) {
+            printf("^");
+        }
+    }
+    printf("\n");
+}
 
 Lex_Scope scopeToken(Token token) {
     return (Lex_Scope){
@@ -322,129 +373,51 @@ Lex_Scope scopeToken(Token token) {
     };
 }
 
-void printArrows(unsigned indent, size_t start, size_t length) {
-    for (unsigned i = 0; i < indent; ++i) {
-        printf(" ");
-    }
-    for (size_t i = 0; i < start; ++i) {
-        printf(" ");
-    }
-    for (size_t i = 0; i < length; ++i) {
-        printf("^");
-    }
-    printf("\n");
+Lex_Scope scopeBetween(Token start, Token end) {
+    return (Lex_Scope){
+        .lineNumStart = start.lineNum,
+        .charNumStart = start.charNum,
+        .lineStart = start.line,
+        .lineNumEnd = end.lineNum,
+        .charNumEnd = end.charNum + end.text.length,
+        .lineEnd = end.line,
+    };
 }
 
-void printArrowSpan(Lex_Scope scope) {
-        if (scope.lineNumStart == scope.lineNumEnd) {
-            printf("  "SV_FMT"\n", SV_ARG(scope.lineStart));
-            printArrows(2, scope.charNumStart - 1, scope.charNumEnd - scope.charNumStart);
-        }
-        else {
-            printf("  Line %5zu: "SV_FMT"\n", scope.lineNumStart, SV_ARG(scope.lineStart));
-            printf("      ...");
-            printArrows(5, scope.charNumStart - 1, scope.lineStart.length - scope.charNumStart);
-            printf("  Line %5zu: "SV_FMT"\n", scope.lineNumEnd, SV_ARG(scope.lineEnd));
-            printArrows(14, 0, scope.charNumEnd - 1);
-        }
-}
-
-// IMPORTANT: 1
-MAYBE(Lex_Scope) scopeAndEatUntil(Lexer* lexer, Token token, Token_Type wanted) {
-    MAYBE(Lex_Scope) result;
-    result.exists = true;
-    result.inner.lineNumStart = token.lineNum;
-    result.inner.charNumStart = token.charNum;
-    result.inner.lineStart = token.line;
-    while (token.type != wanted) {
-        if (token.type == TOKEN_EOF) {
-            result.exists = false;
-            break;
-        }
-        result.inner.lineNumEnd = token.lineNum;
-        result.inner.charNumEnd = token.charNum + token.text.length;
-        result.inner.lineEnd = token.line;
-        token = getToken(lexer);
+// Eats up to, but not including, the next token of type `wanted`.
+// If a token of type `TOKEN_EOF` is found, returns a token of type `TOKEN_EOF`.
+// NOTE: The parameter `start` is necessary since `eatUpTo` is usually called after a failed `getToken`.
+//   If the next token is of type `wanted`, then `start` is returned.
+Token eatUpTo(Lexer* lexer, Token start, Token_Type wanted) {
+    Token peeked = peekToken(lexer);
+    if (peeked.type == wanted) {
+        return start;
+    }
+    Token result;
+    while (peeked.type != wanted && peeked.type != TOKEN_EOF) {
+        result = getToken(lexer);
+        peeked = peekToken(lexer);
+    }
+    if (peeked.type == TOKEN_EOF) {
+        return peeked;
     }
     return result;
 }
 
-// IMPORTANT: 1
-MAYBE(Lex_Scope) scopeAndEatUntilKeyword(Lexer* lexer, Token token, char* keyword) {
-    MAYBE(Lex_Scope) result;
-    result.exists = true;
-    result.inner.lineNumStart = token.lineNum;
-    result.inner.charNumStart = token.charNum;
-    result.inner.lineStart = token.line;
-    while (token.type != TOKEN_IDENT_OR_KEYWORD || !svEqualsCStr(token.text, keyword)) {
-        if (token.type == TOKEN_EOF) {
-            result.exists = false;
-            break;
-        }
-        result.inner.lineNumEnd = token.lineNum;
-        result.inner.charNumEnd = token.charNum + token.text.length;
-        result.inner.lineEnd = token.line;
-        token = getToken(lexer);
+Token eatUpToKeyword(Lexer* lexer, Token start, char* wanted) {
+    Token peeked = peekToken(lexer);
+    if (peeked.type == TOKEN_IDENT_OR_KEYWORD && svEqualsCStr(peeked.text, wanted)) {
+        return start;
+    }
+    Token result;
+    while ((peeked.type != TOKEN_IDENT_OR_KEYWORD || !svEqualsCStr(peeked.text, wanted)) && peeked.type != TOKEN_EOF) {
+        result = getToken(lexer);
+        peeked = peekToken(lexer);
+    }
+    if (peeked.type == TOKEN_EOF) {
+        return peeked;
     }
     return result;
-}
-
-// Returns true if token of type wanted is found, false if EOF is found.
-bool eatUntil(Lexer* lexer, Token_Type wanted) {
-    Token token = getToken(lexer);
-    size_t lineNumStart = token.lineNum;
-    while (token.type != wanted) {
-        if (token.type == TOKEN_EOF) {
-            return false;
-        }
-        token = getToken(lexer);
-    }
-    return true;
-}
-
-void vPrintError(char* fileName, Lex_Scope scope, char* msg, va_list args) {
-    printf("%s:%zu:%zu: error! ", fileName, scope.lineNumStart, scope.charNumStart);
-    vprintf(msg, args);
-    printf(":\n");
-    printArrowSpan(scope);
-    printf("\n");
-}
-
-void printError(char* fileName, Lex_Scope scope, char* msg, ...) {
-    va_list args;
-    va_start(args, msg);
-    vPrintError(fileName, scope, msg, args);
-    va_end(args);
-}
-
-void reportAndEatUntil(Lexer* lexer, Lex_Scope scope, Token_Type wanted, char* msg, ...) {
-    va_list args;
-    va_start(args, msg);
-    vPrintError(lexer->fileName, scope, msg, args);
-    va_end(args);
-    bool found = eatUntil(lexer, wanted);
-    if (!found) {
-        exit(1);
-    }
-}
-
-//TODO: Can we support string formatting here?
-void reportScopeAndEatUntil(Lexer* lexer, Lex_Scope scope, Token token, Token_Type wanted, char* msgFound, char* msgNotFound) {
-    MAYBE(Lex_Scope) eatScope = scopeAndEatUntil(lexer, token, wanted);
-    if (!eatScope.exists) {
-       printError(lexer->fileName, scope, msgNotFound); 
-       exit(1);
-    }
-    printError(lexer->fileName, eatScope.inner, msgFound);
-}
-
-void reportScopeAndEatUntilKeyword(Lexer* lexer, Lex_Scope scope, Token token, char* wanted, char* msgFound, char* msgNotFound) {
-    MAYBE(Lex_Scope) eatScope = scopeAndEatUntilKeyword(lexer, token, wanted);
-    if (!eatScope.exists) {
-       printError(lexer->fileName, scope, msgNotFound); 
-       exit(1);
-    }
-    printError(lexer->fileName, eatScope.inner, msgFound);
 }
 
 enum Node_Type;
@@ -456,9 +429,13 @@ typedef enum Node_Type {
     NODE_SCOPE,
     NODE_EXPR_LIST,
     NODE_ARG_LIST,
+    //TODO: Should we have NODE_LIT with a type field?
+    NODE_INT,
+    NODE_RETURN,
 } Node_Type;
 
 typedef union Node_Data {
+    //TODO: Rename these fields to avoid collisions
     struct {
         // NODE_FUNCTION
         String_View name;
@@ -493,29 +470,6 @@ typedef struct {
     size_t capacity;
 } AST_Node_Arena;
 
-typedef struct {
-    AST_Node** functions;
-    size_t length;
-    size_t capacity;
-} Function_Array;
-
-Function_Array makeFunctionArray(size_t capacity) {
-    return (Function_Array){
-        .functions = malloc(capacity * sizeof(AST_Node*)),
-        .length = 0,
-        .capacity = capacity,
-    };
-}
-
-void pushFunction(Function_Array* array, AST_Node* function) {
-    if (array->length == array->capacity) {
-        array->capacity *= 2;
-        array->functions = realloc(array->functions, array->capacity * sizeof(AST_Node*));
-    }
-    array->functions[array->length] = function;
-    array->length++;
-}
-
 AST_Node_Arena makeNodeArena(size_t capacity) {
     return (AST_Node_Arena){
         .nodes = malloc(capacity * sizeof(AST_Node)),
@@ -538,9 +492,6 @@ MAYBE_PTR(AST_Node) parseArgList(AST_Node_Arena* arena, Lexer* lexer) {
     result.exists = true;
     Token token = getToken(lexer);
     if (token.type != TOKEN_LPAREN) {
-        reportScopeAndEatUntil(lexer, scopeToken(token), token, TOKEN_LPAREN,
-                "Junk between \"func\" keyword and argument list",
-                "Expected \"(\" after \"func\" keyword");
         result.exists = false;
     }
 
@@ -550,7 +501,6 @@ MAYBE_PTR(AST_Node) parseArgList(AST_Node_Arena* arena, Lexer* lexer) {
         return result;
     }
     if (token.type != TOKEN_IDENT_OR_KEYWORD) {
-        reportAndEatUntil(lexer, scopeToken(token), TOKEN_IDENT_OR_KEYWORD, "Expected identifier, got \""SV_FMT"\"", SV_ARG(token.text));
         result.exists = false;
     }
 
@@ -564,12 +514,10 @@ MAYBE_PTR(AST_Node) parseArgList(AST_Node_Arena* arena, Lexer* lexer) {
     token = getToken(lexer);
     while (token.type != TOKEN_RPAREN) {
         if (token.type != TOKEN_COMMA) {
-            reportAndEatUntil(lexer, scopeToken(token), TOKEN_COMMA, "Expected \",\", got \""SV_FMT"\"", SV_ARG(token.text));
             result.exists = false;
         }
         token = getToken(lexer);
         if (token.type != TOKEN_IDENT_OR_KEYWORD) {
-            reportAndEatUntil(lexer, scopeToken(token), TOKEN_IDENT_OR_KEYWORD, "Expected identifier, got \""SV_FMT"\"", SV_ARG(token.text));
             result.exists = false;
         }
         curr->data.nextArg = allocateNode(arena);
@@ -587,15 +535,8 @@ MAYBE_PTR(AST_Node) parseScope(AST_Node_Arena* arena, Lexer* lexer) {
     result.exists = true;
     Token token = getToken(lexer);
     if (token.type != TOKEN_LBRACE) {
-        reportAndEatUntil(lexer, scopeToken(token), TOKEN_LBRACE, "Expected \"{\", got \""SV_FMT"\"", SV_ARG(token.text));
         result.exists = false;
     }
-
-    //TEMPORARY
-    //TODO: Parse expression list
-    token = getToken(lexer);
-    assert(token.type == TOKEN_RBRACE);
-
     if (result.exists) {
         result.inner = allocateNode(arena);
         result.inner->type = NODE_SCOPE;
@@ -609,25 +550,46 @@ MAYBE_PTR(AST_Node) parseFunction(AST_Node_Arena* arena, Lexer* lexer) {
     result.exists = true;
     Token token = getToken(lexer);
     if (token.type != TOKEN_IDENT_OR_KEYWORD) {
-        reportAndEatUntil(lexer, scopeToken(token), TOKEN_IDENT_OR_KEYWORD, "Expected identifier, but got \""SV_FMT"\"", SV_ARG(token.text));
+        Token last = eatUpTo(lexer, token, TOKEN_IDENT_OR_KEYWORD);
+        printf("%s:%zu:%zu: error! Expected an identifier, got \""SV_FMT"\":\n", lexer->fileName, token.lineNum, token.charNum, SV_ARG(token.text));
+        printScope(scopeToken(token));
+        if (last.type == TOKEN_EOF) {
+            exit(1);
+        }
+        token = getToken(lexer); // Required, since `eatUpTo` does not consume the token of the desired type.
         result.exists = false;
     }
     String_View name = token.text;
 
     token = getToken(lexer);
     if (token.type != TOKEN_DCOLON) {
-        //TODO: This could be made better if we supported string formatting
-        reportScopeAndEatUntil(lexer, scopeToken(token), token, TOKEN_DCOLON,
-                "Junk between function name and \"::\"",
-                "Expected \"::\" after function identifier");
+        Token last = eatUpTo(lexer, token, TOKEN_DCOLON);
+        if (last.type == TOKEN_EOF) {
+            printf("%s:%zu:%zu: error! Unexpected end of file while parsing function definition. Parsing got to here:\n", lexer->fileName, token.lineNum, token.charNum);
+            printScope(scopeToken(token));
+            exit(1);
+        }
+        else {
+            printf("%s:%zu:%zu: error! Unexpected text between function name and \"::\":\n", lexer->fileName, token.lineNum, token.charNum);
+            printScope(scopeBetween(token, last));
+        }
+        token = getToken(lexer); // Required, since `eatUpTo` does not consume the token of the desired type.
         result.exists = false;
     }
 
     token = getToken(lexer);
     if (token.type != TOKEN_IDENT_OR_KEYWORD || !svEqualsCStr(token.text, "func")) {
-        reportScopeAndEatUntilKeyword(lexer, scopeToken(token), token, "func",
-                "Junk between \"::\" and \"func\" keyword",
-                "Expected \"func\" keyword after \"::\"");
+        Token last = eatUpToKeyword(lexer, token, "func");
+        if (last.type == TOKEN_EOF) {
+            printf("%s:%zu:%zu: error! Unexpected end of file while parsing function definition. Parsing got to here:\n", lexer->fileName, token.lineNum, token.charNum);
+            printScope(scopeToken(token));
+            exit(1);
+        }
+        else {
+            printf("%s:%zu:%zu: error! Unexpected text between \"::\" and \"func\" keyword:\n", lexer->fileName, token.lineNum, token.charNum);
+            printScope(scopeBetween(token, last));
+        }
+        token = getToken(lexer); // Required, since `eatUpTo` does not consume the token of the desired type.
         result.exists = false;
     }
 
@@ -647,23 +609,6 @@ MAYBE_PTR(AST_Node) parseFunction(AST_Node_Arena* arena, Lexer* lexer) {
         result.inner->data.name = name;
         result.inner->data.args = args.inner;
         result.inner->data.body = body.inner;
-    }
-    return result;
-}
-
-//Returns true if the program is valid, false otherwise.
-bool parseProgram(Function_Array* functions, AST_Node_Arena* arena, Lexer* lexer) {
-    bool result = true;
-    Token token = peekToken(lexer);
-    while (token.type != TOKEN_EOF) {
-        MAYBE_PTR(AST_Node) function = parseFunction(arena, lexer);
-        if (function.exists) {
-            pushFunction(functions, function.inner);
-        }
-        else {
-            result = false;
-        }
-        token = peekToken(lexer);
     }
     return result;
 }
@@ -752,12 +697,9 @@ int main() {
     char* code = readEntireFile(fileName);
     Lexer lexer = makeLexer(code, fileName);
     AST_Node_Arena arena = makeNodeArena(10);
-    Function_Array functions = makeFunctionArray(10);
-    bool success = parseProgram(&functions, &arena, &lexer);
-    if (success) {
-        for (size_t i = 0; i < functions.length; ++i) {
-            printNode(*functions.functions[i]);
-        }
+    MAYBE_PTR(AST_Node) func = parseFunction(&arena, &lexer);
+    if (func.exists) {
+        printNode(*func.inner);
     }
     return 0;
 }
