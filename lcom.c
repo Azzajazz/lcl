@@ -172,7 +172,6 @@ typedef struct {
     //TODO: This is only used for getToken right now. Do we really need it?
     size_t consumed; // The number of characters consumed to retrieve this token.
 } Token;
-MAYBE_DEF(Token);
 
 typedef struct {
     char* code;
@@ -215,7 +214,6 @@ bool isLexemeTerminator(char c) {
         || c == ':';
 }
 
-//TODO: Would this be cleaner if it returned a MAYBE(Token) and we removed TOKEN_EOF?
 Token getToken(Lexer* lexer) {
     while (isspace(*lexer->code)) {
         lexerAdvance(lexer, 1);
@@ -284,6 +282,10 @@ Token peekToken(Lexer* lexer) {
     return token;
 }
 
+bool isKeyword(Token token, char* keyword) {
+    return (token.type == TOKEN_IDENT_OR_KEYWORD && svEqualsCStr(token.text, keyword));
+}
+
 void printToken(Token token) {
     char* typeString;
     switch (token.type) {
@@ -320,6 +322,92 @@ void printToken(Token token) {
 ////////////////
 // Parser API //
 ////////////////
+
+enum Node_Type;
+union Node_Data;
+struct AST_Node;
+
+typedef enum Node_Type {
+    NODE_FUNCTION,
+    NODE_SCOPE,
+    NODE_EXPR_LIST,
+    NODE_ARG_LIST,
+    //TODO: Should we have NODE_LIT with a type field?
+    NODE_INT,
+    NODE_RETURN,
+} Node_Type;
+
+typedef union Node_Data {
+    //TODO: Rename these fields to avoid collisions
+    struct {
+        // NODE_FUNCTION
+        String_View name;
+        struct AST_Node* args;
+        struct AST_Node* body;
+    };
+    struct {
+        // NODE_SCOPE
+        struct AST_Node* exprs;
+    };
+    struct {
+        // NODE_EXPR_LIST
+        struct AST_Node* expr;
+        struct AST_Node* nextExpr;
+    };
+    struct {
+        // NODE_ARG_LIST
+        String_View arg;
+        struct AST_Node* nextArg;
+    };
+} Node_Data;
+
+typedef struct AST_Node {
+    Node_Type type;
+    Node_Data data;
+} AST_Node;
+    
+typedef struct {
+    AST_Node* nodes;
+    size_t length;
+    size_t capacity;
+} AST_Node_Arena;
+
+AST_Node_Arena makeNodeArena(size_t capacity) {
+    return (AST_Node_Arena){
+        .nodes = malloc(capacity * sizeof(AST_Node)),
+        .length = 0,
+        .capacity = capacity,
+    };
+}
+
+AST_Node* allocateNode(AST_Node_Arena* arena) {
+    if (arena->length == arena->capacity) {
+        arena->capacity *= 2;
+        arena->nodes = realloc(arena->nodes, arena->capacity * sizeof(AST_Node));
+    }
+    arena->length++;
+    return arena->nodes + arena->length - 1;
+}
+
+// TODO: Continue filling out the parser struct. 
+// This might make the API a lot cleaner for no extra overhead. For example:
+//   - MAYBE_PTR(AST_Node) (and therefore the clunky MAYBE stuff in general) is no longer needed, since the parser could keep a flag as to whether parsing was successful.
+//   - Keeping track of the node scopes becomes less cumbersome and removes the need for out parameters in `eatUntil*`
+typedef struct {
+    Lexer          lexer;
+    AST_Node_Arena arena;
+    Token          current;
+//    Token          before_current; // This is used for scopes that pass over multiple tokens.
+    bool           success;        // Denotes whether parsing was successful.
+} Parser;
+
+Parser makeParser(char* code, char* fileName) {
+    return (Parser){
+        .lexer = makeLexer(code, fileName),
+        .arena = makeNodeArena(10),
+        .success = true,
+    };
+}
 
 typedef struct {
     size_t lineNumStart;
@@ -384,233 +472,237 @@ Lex_Scope scopeBetween(Token start, Token end) {
     };
 }
 
-// Eats up to, but not including, the next token of type `wanted`.
-// If a token of type `TOKEN_EOF` is found, returns a token of type `TOKEN_EOF`.
-// NOTE: The parameter `start` is necessary since `eatUpTo` is usually called after a failed `getToken`.
-//   If the next token is of type `wanted`, then `start` is returned.
-Token eatUpTo(Lexer* lexer, Token start, Token_Type wanted) {
-    Token peeked = peekToken(lexer);
-    if (peeked.type == wanted) {
-        return start;
-    }
-    Token result;
-    while (peeked.type != wanted && peeked.type != TOKEN_EOF) {
-        result = getToken(lexer);
-        peeked = peekToken(lexer);
-    }
-    if (peeked.type == TOKEN_EOF) {
-        return peeked;
-    }
-    return result;
-}
-
-Token eatUpToKeyword(Lexer* lexer, Token start, char* wanted) {
-    Token peeked = peekToken(lexer);
-    if (peeked.type == TOKEN_IDENT_OR_KEYWORD && svEqualsCStr(peeked.text, wanted)) {
-        return start;
-    }
-    Token result;
-    while ((peeked.type != TOKEN_IDENT_OR_KEYWORD || !svEqualsCStr(peeked.text, wanted)) && peeked.type != TOKEN_EOF) {
-        result = getToken(lexer);
-        peeked = peekToken(lexer);
-    }
-    if (peeked.type == TOKEN_EOF) {
-        return peeked;
-    }
-    return result;
-}
-
-enum Node_Type;
-union Node_Data;
-struct AST_Node;
-
-typedef enum Node_Type {
-    NODE_FUNCTION,
-    NODE_SCOPE,
-    NODE_EXPR_LIST,
-    NODE_ARG_LIST,
-    //TODO: Should we have NODE_LIT with a type field?
-    NODE_INT,
-    NODE_RETURN,
-} Node_Type;
-
-typedef union Node_Data {
-    //TODO: Rename these fields to avoid collisions
-    struct {
-        // NODE_FUNCTION
-        String_View name;
-        struct AST_Node* args;
-        struct AST_Node* body;
-    };
-    struct {
-        // NODE_SCOPE
-        struct AST_Node* exprs;
-    };
-    struct {
-        // NODE_EXPR_LIST
-        struct AST_Node* expr;
-        struct AST_Node* nextExpr;
-    };
-    struct {
-        // NODE_ARG_LIST
-        String_View arg;
-        struct AST_Node* nextArg;
-    };
-} Node_Data;
-
-typedef struct AST_Node {
-    Node_Type type;
-    Node_Data data;
-} AST_Node;
-MAYBE_PTR_DEF(AST_Node);
-    
-typedef struct {
-    AST_Node* nodes;
-    size_t length;
-    size_t capacity;
-} AST_Node_Arena;
-
-AST_Node_Arena makeNodeArena(size_t capacity) {
-    return (AST_Node_Arena){
-        .nodes = malloc(capacity * sizeof(AST_Node)),
-        .length = 0,
-        .capacity = capacity,
+Lex_Scope scopeAfter(Token token) {
+    return (Lex_Scope){
+        .lineNumStart = token.lineNum,
+        .charNumStart = token.charNum + token.text.length + 1,
+        .lineStart = token.line,
+        .lineNumEnd = token.lineNum,
+        .charNumEnd = token.charNum + token.text.length + 2,
+        .lineEnd = token.line,
     };
 }
 
-AST_Node* allocateNode(AST_Node_Arena* arena) {
-    if (arena->length == arena->capacity) {
-        arena->capacity *= 2;
-        arena->nodes = realloc(arena->nodes, arena->capacity * sizeof(AST_Node));
+void eatUntil(Parser* parser, Token_Type wanted) {
+    parser->current = getToken(&parser->lexer);
+    while (parser->current.type != wanted && parser->current.type != TOKEN_EOF) {
+        parser->current = getToken(&parser->lexer);
     }
-    arena->length++;
-    return arena->nodes + arena->length - 1;
 }
 
-MAYBE_PTR(AST_Node) parseArgList(AST_Node_Arena* arena, Lexer* lexer) {
-    MAYBE_PTR(AST_Node) result;
-    result.exists = true;
-    Token token = getToken(lexer);
-    if (token.type != TOKEN_LPAREN) {
-        result.exists = false;
+void eatUntilKeyword(Parser* parser, char* wanted) {
+    parser->current = getToken(&parser->lexer);
+    while (!isKeyword(parser->current, wanted) && parser->current.type != TOKEN_EOF) {
+        parser->current = getToken(&parser->lexer);
     }
+}
 
-    token = getToken(lexer);
-    if (token.type == TOKEN_RPAREN) {
-        result.inner = NULL;
-        return result;
-    }
-    if (token.type != TOKEN_IDENT_OR_KEYWORD) {
-        result.exists = false;
-    }
+// nocheckin: The parse* functions will not compile right now.
 
-    //OPTIMIZATION: If result.exists is false, we could avoid some allocations here.
-    result.inner = allocateNode(arena);
-    result.inner->type = NODE_ARG_LIST;
-    result.inner->data.arg = token.text;
-    result.inner->data.nextArg = NULL;
-    AST_Node* curr = result.inner;
-
-    token = getToken(lexer);
-    while (token.type != TOKEN_RPAREN) {
-        if (token.type != TOKEN_COMMA) {
-            result.exists = false;
+AST_Node* parseArgList(Parser* parser) {
+    Token funcKeyword = parser->current;
+    parser->current = getToken(&parser->lexer);
+    if (parser->current.type != TOKEN_LPAREN) {
+        if (parser->current.type == TOKEN_EOF) {
+            printf("%s:%zu:%zu: Expected \"(\" after \"func\" keyword:\n",
+                    parser->lexer.fileName, parser->current.lineNum, parser->current.charNum);
+            printScope(scopeAfter(funcKeyword));
+            exit(1);
         }
-        token = getToken(lexer);
-        if (token.type != TOKEN_IDENT_OR_KEYWORD) {
-            result.exists = false;
+        else {
+            printf("%s:%zu:%zu: Expected \"(\" after \"func\" keyword, but got\""SV_FMT"\":\n",
+                    parser->lexer.fileName, parser->current.lineNum, parser->current.charNum, SV_ARG(parser->current.text));
+            printScope(scopeToken(parser->current));
         }
-        curr->data.nextArg = allocateNode(arena);
+        parser->success = false;
+    }
+
+
+    Token openParen = parser->current;
+    parser->current = getToken(&parser->lexer);
+    if (parser->current.type == TOKEN_RPAREN) {
+        return NULL;
+    }
+    if (parser->current.type != TOKEN_IDENT_OR_KEYWORD) {
+        if (parser->current.type == TOKEN_EOF) {
+            printf("%s:%zu:%zu: Expected \")\" in argument list:\n",
+                    parser->lexer.fileName, parser->current.lineNum, parser->current.charNum);
+            printScope(scopeAfter(openParen));
+            exit(1);
+        }
+        else {
+            printf("%s:%zu:%zu: Expected argument name or \")\" in argument list, got \""SV_FMT"\":\n",
+                    parser->lexer.fileName, parser->current.lineNum, parser->current.charNum, SV_ARG(parser->current.text));
+            printScope(scopeToken(parser->current));
+            eatUntil(parser, TOKEN_IDENT_OR_KEYWORD);
+            if (parser->current.type == TOKEN_EOF) {
+                exit(1);
+            }
+        }
+        parser->success = false;
+    }
+
+    //OPTIMIZATION: If parser->success is false, we could avoid some allocations here.
+    AST_Node* head = allocateNode(&parser->arena);
+    head->type = NODE_ARG_LIST;
+    head->data.arg = parser->current.text;
+    head->data.nextArg = NULL;
+    AST_Node* curr = head;
+
+    Token arg = parser->current;
+    parser->current = getToken(&parser->lexer);
+    while (parser->current.type != TOKEN_RPAREN) {
+        if (parser->current.type != TOKEN_COMMA) {
+            if (parser->current.type == TOKEN_EOF) {
+                printf("%s:%zu:%zu: Expected \",\" or \")\" after argument in argument list:\n",
+                        parser->lexer.fileName, arg.lineNum, arg.charNum);
+                printScope(scopeAfter(arg));
+                exit(1);
+            }
+            else {
+                printf("%s:%zu:%zu: Expected \",\" or \")\" after argument in argument list, got\""SV_FMT"\":\n",
+                        parser->lexer.fileName, parser->current.lineNum, parser->current.charNum, SV_ARG(parser->current.text));
+                printScope(scopeToken(parser->current));
+                eatUntil(parser, TOKEN_COMMA);
+                if (parser->current.type == TOKEN_EOF) {
+                    exit(1);
+                }
+            }
+            parser->success = false;
+        }
+
+        Token comma = parser->current;
+        parser->current = getToken(&parser->lexer);
+
+        if (parser->current.type != TOKEN_IDENT_OR_KEYWORD) {
+            if (parser->current.type == TOKEN_EOF) {
+                printf("%s:%zu:%zu: Expected an identifier after \",\" in argument list:\n",
+                        parser->lexer.fileName, comma.lineNum, comma.charNum);
+                printScope(scopeAfter(comma));
+                exit(1);
+            }
+            else {
+                printf("%s:%zu:%zu: Expected an identifier after \",\" in argument list, got \""SV_FMT"\":\n",
+                        parser->lexer.fileName, parser->current.lineNum, parser->current.charNum, SV_ARG(parser->current.text));
+                printScope(scopeToken(parser->current));
+                eatUntil(parser, TOKEN_IDENT_OR_KEYWORD);
+                if (parser->current.type == TOKEN_EOF) {
+                    exit(1);
+                }
+            }
+            parser->success = false;
+        }
+        curr->data.nextArg = allocateNode(&parser->arena);
         curr = curr->data.nextArg;
         curr->type = NODE_ARG_LIST;
-        curr->data.arg = token.text;
+        curr->data.arg = parser->current.text;
         curr->data.nextArg = NULL;
-        token = getToken(lexer);
+
+        arg = parser->current;
+        parser->current = getToken(&parser->lexer);
     }
-    return result;
+    return head;
 }
 
-MAYBE_PTR(AST_Node) parseScope(AST_Node_Arena* arena, Lexer* lexer) {
-    MAYBE_PTR(AST_Node) result;
-    result.exists = true;
-    Token token = getToken(lexer);
-    if (token.type != TOKEN_LBRACE) {
-        result.exists = false;
-    }
-    if (result.exists) {
-        result.inner = allocateNode(arena);
-        result.inner->type = NODE_SCOPE;
-        result.inner->data.exprs = NULL;
-    }
-    return result;
-}
-
-MAYBE_PTR(AST_Node) parseFunction(AST_Node_Arena* arena, Lexer* lexer) {
-    MAYBE_PTR(AST_Node) result;
-    result.exists = true;
-    Token token = getToken(lexer);
-    if (token.type != TOKEN_IDENT_OR_KEYWORD) {
-        Token last = eatUpTo(lexer, token, TOKEN_IDENT_OR_KEYWORD);
-        printf("%s:%zu:%zu: error! Expected an identifier, got \""SV_FMT"\":\n", lexer->fileName, token.lineNum, token.charNum, SV_ARG(token.text));
-        printScope(scopeToken(token));
-        if (last.type == TOKEN_EOF) {
-            exit(1);
-        }
-        token = getToken(lexer); // Required, since `eatUpTo` does not consume the token of the desired type.
-        result.exists = false;
-    }
-    String_View name = token.text;
-
-    token = getToken(lexer);
-    if (token.type != TOKEN_DCOLON) {
-        Token last = eatUpTo(lexer, token, TOKEN_DCOLON);
-        if (last.type == TOKEN_EOF) {
-            printf("%s:%zu:%zu: error! Unexpected end of file while parsing function definition. Parsing got to here:\n", lexer->fileName, token.lineNum, token.charNum);
-            printScope(scopeToken(token));
+AST_Node* parseScope(Parser* parser) {
+    Token closeParen = parser->current;
+    parser->current = getToken(&parser->lexer);
+    if (parser->current.type != TOKEN_LBRACE) {
+        if (parser->current.type == TOKEN_EOF) {
+            printf("%s:%zu:%zu: error! Expected \"{\" after argument list:\n",
+                    parser->lexer.fileName, closeParen.lineNum, closeParen.charNum);
+            printScope(scopeAfter(closeParen));
             exit(1);
         }
         else {
-            printf("%s:%zu:%zu: error! Unexpected text between function name and \"::\":\n", lexer->fileName, token.lineNum, token.charNum);
-            printScope(scopeBetween(token, last));
+            printf("%s:%zu:%zu: error! Expected \"{\" after argument list, but got \""SV_FMT"\":\n",
+                    parser->lexer.fileName, parser->current.lineNum, parser->current.charNum, SV_ARG(parser->current.text));
+            printScope(scopeToken(parser->current));
+            eatUntil(parser, TOKEN_LBRACE);
+            if (parser->current.type == TOKEN_EOF) {
+                exit(1);
+            }
         }
-        token = getToken(lexer); // Required, since `eatUpTo` does not consume the token of the desired type.
-        result.exists = false;
+        parser->success = false;
+    }
+    //TODO: Temporary. We want to parse and ExprList here:
+    parser->current = getToken(&parser->lexer);
+    assert(parser->current.type == TOKEN_RBRACE);
+    if (parser->success) {
+        AST_Node* node = allocateNode(&parser->arena);
+        node->type = NODE_SCOPE;
+        node->data.exprs = NULL;
+        return node;
+    }
+    return NULL;
+}
+
+AST_Node* parseFunction(Parser* parser) {
+    parser->current = getToken(&parser->lexer);
+    if (parser->current.type != TOKEN_IDENT_OR_KEYWORD) {
+        printf("%s:%zu:%zu: error! Expected an identifier, got\""SV_FMT"\":\n",
+                parser->lexer.fileName, parser->current.lineNum, parser->current.charNum, SV_ARG(parser->current.text));
+        printScope(scopeToken(parser->current));
+        eatUntil(parser, TOKEN_IDENT_OR_KEYWORD);
+        if (parser->current.type == TOKEN_EOF) {
+            exit(1);
+        }
+        parser->success = false;
     }
 
-    token = getToken(lexer);
-    if (token.type != TOKEN_IDENT_OR_KEYWORD || !svEqualsCStr(token.text, "func")) {
-        Token last = eatUpToKeyword(lexer, token, "func");
-        if (last.type == TOKEN_EOF) {
-            printf("%s:%zu:%zu: error! Unexpected end of file while parsing function definition. Parsing got to here:\n", lexer->fileName, token.lineNum, token.charNum);
-            printScope(scopeToken(token));
+    Token nameToken = parser->current;
+    String_View name = parser->current.text;
+
+    parser->current = getToken(&parser->lexer);
+    if (parser->current.type != TOKEN_DCOLON) {
+        if (isKeyword(parser->current, "func")) {
+            printf("%s:%zu:%zu: error! Missing \"::\" between function name and \"func\" keyword:\n",
+                    parser->lexer.fileName, nameToken.lineNum, nameToken.charNum);
+            printScope(scopeBetween(nameToken, parser->current));
+        }
+        else if (parser->current.type == TOKEN_EOF) {
+            printf("%s:%zu:%zu: error! Expected \"::\" after function name:\n",
+                    parser->lexer.fileName, nameToken.lineNum, nameToken.charNum);
+            printScope(scopeAfter(nameToken));
             exit(1);
         }
         else {
-            printf("%s:%zu:%zu: error! Unexpected text between \"::\" and \"func\" keyword:\n", lexer->fileName, token.lineNum, token.charNum);
-            printScope(scopeBetween(token, last));
+            printf("%s:%zu:%zu: error! Expected \"::\" after function name, but got \""SV_FMT"\":\n",
+                    parser->lexer.fileName, parser->current.lineNum, parser->current.charNum, SV_ARG(parser->current.text));
+            printScope(scopeToken(parser->current));
         }
-        token = getToken(lexer); // Required, since `eatUpTo` does not consume the token of the desired type.
-        result.exists = false;
+        eatUntil(parser, TOKEN_DCOLON);
+        if (parser->current.type == TOKEN_EOF) {
+            exit(1);
+        }
+        parser->success = false;
     }
 
-    MAYBE_PTR(AST_Node) args = parseArgList(arena, lexer);
-    if (!args.exists) {
-        result.exists = false;
+    parser->current = getToken(&parser->lexer);
+    if (!isKeyword(parser->current, "func")) {
+        printf("%s:%zu:%zu: error! Expected \"func\" keyword after \"::\", but got \""SV_FMT"\":\n",
+                parser->lexer.fileName, parser->current.lineNum, parser->current.charNum, SV_ARG(parser->current.text));
+        printScope(scopeToken(parser->current));
+        eatUntilKeyword(parser, "func");
+        if (parser->current.type == TOKEN_EOF) {
+            exit(1);
+        }
+        parser->success = false;
     }
 
-    MAYBE_PTR(AST_Node) body = parseScope(arena, lexer);
-    if (!body.exists) {
-        result.exists = false;
-    }
+    AST_Node* args = parseArgList(parser);
 
-    if (result.exists) {
-        result.inner = allocateNode(arena);
-        result.inner->type = NODE_FUNCTION;
-        result.inner->data.name = name;
-        result.inner->data.args = args.inner;
-        result.inner->data.body = body.inner;
+    AST_Node* body = parseScope(parser);
+
+    if (parser->success) {
+        AST_Node* node = allocateNode(&parser->arena);
+        node->type = NODE_FUNCTION;
+        node->data.name = name;
+        node->data.args = args;
+        node->data.body = body;
+        return node;
     }
-    return result;
+    return NULL;
 }
 
 printIndented(unsigned indent, char* fmt, ...) {
@@ -695,11 +787,10 @@ void printNode(AST_Node node) {
 int main() {
     char* fileName = "simple.lcl";
     char* code = readEntireFile(fileName);
-    Lexer lexer = makeLexer(code, fileName);
-    AST_Node_Arena arena = makeNodeArena(10);
-    MAYBE_PTR(AST_Node) func = parseFunction(&arena, &lexer);
-    if (func.exists) {
-        printNode(*func.inner);
+    Parser parser = makeParser(code, fileName);
+    AST_Node* func = parseFunction(&parser);
+    if (parser.success) {
+        printNode(*func);
     }
     return 0;
 }
