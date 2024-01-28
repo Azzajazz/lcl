@@ -8,10 +8,6 @@
 #include <stdarg.h>
 #include <assert.h>
 
-#define uint unsigned
-
-/****************************** IMPORTANT ******************************/
-// 1: In the middle of refactoring and cleaning up error reporting. Next is parseArgList
 
 
 //////////////
@@ -193,8 +189,8 @@ typedef enum {
 
 typedef struct {
     Token_Type type;
-    uint lineNum;
-    uint charNum;
+    int lineNum;
+    int charNum;
     String_View line;
     String_View text;
     int intValue;
@@ -202,10 +198,9 @@ typedef struct {
 
 typedef struct {
     char* code;
-    uint cursor;
     char* fileName;
-    uint lineNum;
-    uint charNum;
+    int lineNum;
+    int charNum;
     String_View line;
 } Lexer;
 
@@ -516,9 +511,6 @@ typedef enum {
     NODE_STATEMENTS,    // Linked lists of statements
     NODE_RETURN,
 
-    // Identifiers
-    NODE_IDENT,
-
     // Literals
     NODE_INT,
 } Node_Type;
@@ -534,7 +526,7 @@ typedef union {
         String_View argArg;
         size_t argNext;
     };
-    size_t scopeStatements;        // NODE_SCOPE
+    size_t scopeStatements;  // NODE_SCOPE
     // Represents a linked list of expressions in a scope.
     struct {                 // NODE_STATEMENTS
         size_t statementStatement;
@@ -567,7 +559,7 @@ AST_Node_List makeNodeList(size_t capacity) {
 size_t addNode(AST_Node_List* list, AST_Node node) {
     if (list->nodeCount == list->capacity) {
         list->capacity *= 2;
-        list->nodes = realloc(list->nodes, list->capacity);
+        list->nodes = realloc(list->nodes, list->capacity * sizeof(AST_Node));
     }
     list->nodes[list->nodeCount++] = node;
     return list->nodeCount - 1;
@@ -783,10 +775,6 @@ void printASTIndented(int indent, AST_Node_List list, size_t root) {
             }
             break;
         }
-        case NODE_IDENT: {
-            printIndented(indent, "type=IDENT, name="SV_FMT"\n", SV_ARG(node.data.identName));
-            break;
-        }
         case NODE_INT: {
             printIndented(indent, "type=INT, value=%d\n", node.data.intValue);
             break;
@@ -885,7 +873,7 @@ int main() {
     char* fileName = "simple.lcl";
     char* code = readEntireFile(fileName);
     Lexer lexer = makeLexer(code, fileName);
-    AST_Node_List list = makeNodeList(10);
+    AST_Node_List list = makeNodeList(8);
     size_t function = parseFunction(&list, &lexer);
     if (function == SIZE_MAX) {
         return 1;
