@@ -52,6 +52,60 @@ void tryFRead(void* buffer, size_t size, size_t count, FILE* stream) {
     }
 }
 
+void tryFPuts(char* str, FILE* file) {
+    fputs(str, file);
+    if (ferror(file)) {
+        fprintf(stderr, "[ERROR]: Could not write to file!\nReason: %s\n", strerror(errno));
+        exit(1);
+    }
+}
+
+void tryFPutsIndented(int indent, char* str, FILE* file) {
+    for (int i = 0; i < indent; ++i) {
+        tryFPuts("    ", file);
+    }
+    tryFPuts(str, file);
+}
+
+void tryFWrite(void* buffer, size_t size, size_t count, FILE* stream) {
+    fwrite(buffer, size, count, stream);
+    if (ferror(stream)) {
+        fprintf(stderr, "[ERROR]: Could not write to file!\nReason: %s\n", strerror(errno));
+        exit(1);
+    }
+}
+
+void tryFWriteIndented(int indent, void* buffer, size_t size, size_t count, FILE* stream) {
+    for (int i = 0; i < indent; ++i) {
+        tryFPuts("    ", stream);
+    }
+    tryFWrite(buffer, size, count, stream);
+}
+
+void vTryFPrintf(FILE* stream, char* fmt, va_list args) {
+    if(vfprintf(stream, fmt, args) < 0) {
+        fprintf(stderr, "[ERROR]: Could not write to file!\nReason: %s\n", strerror(errno));
+        exit(1);
+    }
+}
+
+void tryFPrintf(FILE* stream, char* fmt, ...) {
+    va_list args;
+    va_start(args, fmt);
+    vTryFPrintf(stream, fmt, args);
+    va_end(args);
+}
+
+void tryFPrintfIndented(int indent, FILE* stream, char* fmt, ...) {
+    for (int i = 0; i < indent; ++i) {
+        tryFPuts("    ", stream);
+    } 
+    va_list args;
+    va_start(args, fmt);
+    vTryFPrintf(stream, fmt, args);
+    va_end(args);
+}
+
 long getFileSize(FILE* file) {
     tryFSeek(file, 0, SEEK_END);
     long fileSize = tryFTell(file);
@@ -98,6 +152,10 @@ String_View svUntil(char delim, char* cstr) {
         length++;
     }
     return (String_View){cstr, length};
+}
+
+inline void svTryFWrite(String_View sv, FILE* file) {
+    tryFWrite(sv.start, 1, sv.length, file);
 }
 
 
@@ -749,20 +807,79 @@ void printAST(AST_Node_List list, size_t root) {
 // Emitter API //
 /////////////////
 
-void emitFunction(char* fileName, AST_Node_List list, size_t root) {
-    FILE* file = tryFOpen(fileName);
+void emitExpr(FILE* file, AST_Node_List list, size_t root);
+void emitStatement(int indent, FILE* file, AST_Node_List list, size_t root);
+void emitStatements(int indent, FILE* file, AST_Node_List list, size_t root);
+void emitScope(int indent, FILE* file, AST_Node_List list, size_t root);
+void emitFunction(FILE* file, AST_Node_List list, size_t root);
 
-    fclose(file);
+void emitExpr(FILE* file, AST_Node_List list, size_t root) {
+    AST_Node expr = list.nodes[root];
+    switch (expr.type) {
+        case NODE_INT: {
+            tryFPrintf(file, "%d", expr.data.intValue);
+            break;
+        }
+        default:
+            printf("Unexpected node type: %d\n", expr.type);
+            assert(false && "This is not an expression! (emitExpr)");
+    }
+}
+
+void emitStatement(int indent, FILE* file, AST_Node_List list, size_t root) {
+    AST_Node statement = list.nodes[root];
+    switch (statement.type) {
+        case NODE_RETURN: {
+            tryFPutsIndented(indent, "return ", file);
+            emitExpr(file, list, statement.data.returnExpr);
+            break;
+        }
+        default:
+            printf("Unexpected node type: %d\n", statement.type);
+            assert(false && "This is not a statement! (emitStatement)");
+    }
+    tryFPuts(";\n", file);
+}
+
+void emitStatements(int indent, FILE* file, AST_Node_List list, size_t root) {
+    if (root == SIZE_MAX) {
+        return;
+    }
+    do {
+        AST_Node statements = list.nodes[root];
+        assert(statements.type == NODE_STATEMENTS);
+
+        emitStatement(indent, file, list, statements.data.statementStatement);
+
+        root = statements.data.statementNext;
+    } while (root != SIZE_MAX);
+}
+
+void emitScope(int indent, FILE* file, AST_Node_List list, size_t root) {
+    AST_Node scope = list.nodes[root];
+    assert(scope.type == NODE_SCOPE);
+
+    tryFPutsIndented(indent, "{\n", file);
+    emitStatements(indent + 1, file, list, scope.data.scopeStatements);
+    tryFPutsIndented(indent, "}\n", file);
+}
+
+void emitFunction(FILE* file, AST_Node_List list, size_t root) {
+    AST_Node function = list.nodes[root];
+    assert(function.type == NODE_FUNCTION);
+
+    tryFPuts("int ", file);
+    svTryFWrite(function.data.functionName, file);
+    tryFPuts("() ", file);
+    emitScope(0, file, list, function.data.functionBody);
 }
 
 // Read in file simple.lcl - DONE
 // Have an iterator lexer - DONE
 // Write a simple grammar - DONE* (Will be expanded)
 // Write a simple parser for that grammar - DONE* (Needs error handling)
-// Convert to C code
+// Convert to C code - DONE
 // Compile C code to executable
-
-
 
 int main() {
     char* fileName = "simple.lcl";
@@ -770,8 +887,10 @@ int main() {
     Lexer lexer = makeLexer(code, fileName);
     AST_Node_List list = makeNodeList(10);
     size_t function = parseFunction(&list, &lexer);
-    if (function != SIZE_MAX) {
-        printAST(list, function);
+    if (function == SIZE_MAX) {
+        return 1;
     }
+    FILE* output = tryFOpen("simple.c", "wb");
+    emitFunction(output, list, function);
     return 0;
 }
