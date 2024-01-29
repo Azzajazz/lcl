@@ -226,6 +226,10 @@ typedef enum {
     TOKEN_RBRACE,
     TOKEN_DCOLON,
     TOKEN_SEMICOLON,
+    TOKEN_PLUS,
+    TOKEN_MINUS,
+    TOKEN_STAR,
+    TOKEN_SLASH,
 
     // Keyword tokens
     TOKEN_FUNC_KEYWORD,
@@ -249,6 +253,13 @@ typedef struct {
     String_View text;
     int intValue;
 } Token;
+
+bool isOperator(Token token) {
+    return token.type == TOKEN_PLUS
+        || token.type == TOKEN_MINUS
+        || token.type == TOKEN_STAR
+        || token.type == TOKEN_SLASH;
+}
 
 inline Lex_Scope scopeToken(Token token) {
     return (Lex_Scope){
@@ -451,6 +462,26 @@ Token getToken(Lexer* lexer) {
             lexerAdvance(lexer, 1);
             return result;
         }
+        case '+': {
+            Token result = makeToken(lexer, TOKEN_PLUS, 1);
+            lexerAdvance(lexer, 1);
+            return result;
+        }
+        case '-': {
+            Token result = makeToken(lexer, TOKEN_MINUS, 1);
+            lexerAdvance(lexer, 1);
+            return result;
+        }
+        case '*': {
+            Token result = makeToken(lexer, TOKEN_STAR, 1);
+            lexerAdvance(lexer, 1);
+            return result;
+        }
+        case '/': {
+            Token result = makeToken(lexer, TOKEN_SLASH, 1);
+            lexerAdvance(lexer, 1);
+            return result;
+        }
         default: {
             Token result = getIntToken(lexer);
             if (result.type != TOKEN_ERROR) {
@@ -499,6 +530,18 @@ void printToken(Token token) {
         case TOKEN_SEMICOLON:
             typeString = "SEMICOLON";
             break;
+        case TOKEN_PLUS:
+            typeString = "PLUS";
+            break;
+        case TOKEN_MINUS:
+            typeString = "MINUS";
+            break;
+        case TOKEN_STAR:
+            typeString = "STAR";
+            break;
+        case TOKEN_SLASH:
+            typeString = "SLASH";
+            break;
         case TOKEN_FUNC_KEYWORD:
             typeString = "FUNC_KEYWORD";
             break;
@@ -525,12 +568,18 @@ void printToken(Token token) {
 
 typedef enum {
     NODE_FUNCTION,
-    NODE_ARGS,          // Argument lists to functions
-    NODE_SCOPE,         // Lists of expressions wrapped in braces.
+    NODE_ARGS,       // Argument lists to functions
+    NODE_SCOPE,      // Lists of statements wrapped in braces.
+
+    // Statements
+    NODE_STATEMENTS, // Linked lists of statements
+    NODE_RETURN,
 
     // Expressions
-    NODE_STATEMENTS,    // Linked lists of statements
-    NODE_RETURN,
+    NODE_PLUS,
+    NODE_MINUS,
+    NODE_TIMES,
+    NODE_DIVIDE,
 
     // Literals
     NODE_INT,
@@ -552,6 +601,10 @@ typedef union {
     struct {                 // NODE_STATEMENTS
         size_t statementStatement;
         size_t statementNext;
+    };
+    struct {                 // Binary operations (e.g. NODE_PLUS, NODE_MINUS, ...)
+        size_t binaryOpLeft;
+        size_t binaryOpRight;
     };
     size_t returnExpr;       // NODE_RETURN
     String_View identName;   // NODE_IDENT
@@ -614,15 +667,43 @@ size_t parseScope(AST_Node_List* list, Lexer* lexer);
 size_t parseArgs(AST_Node_List* list, Lexer* lexer, bool* success);
 size_t parseFunction(AST_Node_List* list, Lexer* lexer);
 
+size_t parsePlus(AST_Node_List* list, Lexer* lexer, size_t left) {
+    Token token = getToken(lexer);
+    assert(token.type == TOKEN_PLUS);
+
+    token = getToken(lexer);
+    assert(token.type == TOKEN_INT); // Temporary
+    AST_Node node;
+    node.type = NODE_INT;
+    node.data.intValue = token.intValue;
+    size_t right = addNode(list, node);
+
+    node.type = NODE_PLUS;
+    node.data.binaryOpLeft = left;
+    node.data.binaryOpRight = right;
+    size_t op = addNode(list, node);
+    if (peekToken(lexer).type == TOKEN_PLUS) {
+        return parsePlus(list, lexer, op);
+    }
+    else {
+        return op;
+    }
+}
+
 size_t parseExpr(AST_Node_List* list, Lexer* lexer) {
     Token token = getToken(lexer);
     switch (token.type) {
         case TOKEN_INT: {
-            //TODO: Look to see if there is an operator
             AST_Node node;
             node.type = NODE_INT;
             node.data.intValue = token.intValue;
-            return addNode(list, node);
+            size_t first = addNode(list, node);
+            if (peekToken(lexer).type == TOKEN_PLUS) {
+                return parsePlus(list, lexer, first);
+            }
+            else {
+                return first;
+            }
         }
         default: {
             printErrorMessage(lexer->fileName, scopeToken(token), "Expected a valid expression, got \""SV_FMT"\"", SV_ARG(token.text));
@@ -870,6 +951,13 @@ void printASTIndented(int indent, AST_Node_List list, size_t root) {
             printIndented(indent, "type=INT, value=%d\n", node.data.intValue);
             break;
         }
+        case NODE_PLUS: {
+            printIndented(indent, "type=PLUS, left=(\n");
+            printASTIndented(indent + 1, list, node.data.binaryOpLeft);
+            printIndented(indent, "), right=(\n");
+            printASTIndented(indent + 1, list, node.data.binaryOpRight);
+            break;
+        }
         default:
             printf("%d\n", node.type);
             assert(false && "Non-exhaustive cases in printASTIndented");
@@ -897,6 +985,12 @@ void emitExpr(FILE* file, AST_Node_List list, size_t root) {
     switch (expr.type) {
         case NODE_INT: {
             tryFPrintf(file, "%d", expr.data.intValue);
+            break;
+        }
+        case NODE_PLUS: {
+            emitExpr(file, list, expr.data.binaryOpLeft);
+            tryFPuts(" + ", file);
+            emitExpr(file, list, expr.data.binaryOpRight);
             break;
         }
         default:
@@ -969,6 +1063,7 @@ int main() {
     if (function == SIZE_MAX) {
         return 1;
     }
+    printAST(list, function);
     FILE* output = tryFOpen("simple.c", "wb");
     emitFunction(output, list, function);
     return 0;
