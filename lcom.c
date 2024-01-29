@@ -127,11 +127,11 @@ char* readEntireFile(char* filePath) {
 
 typedef struct {
     char* start;
-    size_t length;
+    int length;
 } String_View;
 
 #define SV_FMT "%.*s"
-#define SV_ARG(sv) (int)(sv).length, (sv).start
+#define SV_ARG(sv) (sv).length, (sv).start
 
 bool svEqualsCStr(String_View sv, char* cstr) {
     for (size_t i = 0; i < sv.length; ++i) {
@@ -143,7 +143,7 @@ bool svEqualsCStr(String_View sv, char* cstr) {
 }
 
 String_View svUntil(char delim, char* cstr) {
-    size_t length = 0;
+    int length = 0;
     for (char* p = cstr; *p && *p != delim; ++p) {
         length++;
     }
@@ -152,6 +152,60 @@ String_View svUntil(char delim, char* cstr) {
 
 inline void svTryFWrite(String_View sv, FILE* file) {
     tryFWrite(sv.start, 1, sv.length, file);
+}
+
+
+
+///////////////
+// Error API //
+///////////////
+
+typedef struct {
+    int lineNumStart;
+    int charNumStart;
+    String_View lineStart;
+    int lineNumEnd;
+    int charNumEnd;
+    String_View lineEnd;
+} Lex_Scope;
+
+void printScope(Lex_Scope scope) {
+    if (scope.lineNumStart == scope.lineNumEnd) {
+        printf("  "SV_FMT"\n", SV_ARG(scope.lineStart));
+        printf("  ");
+        for (int i = 0; i < scope.charNumStart; ++i) {
+            printf(" ");
+        }
+        for (int i = 0; i < scope.charNumEnd - scope.charNumStart; ++i) {
+            printf("^");
+        }
+    }
+    else {
+        printf("  Line %5d: "SV_FMT"\n", scope.lineNumStart + 1, SV_ARG(scope.lineStart));
+        printf("   ...         ");
+        for (int i = 0; i < scope.charNumStart; ++i) {
+            printf(" ");
+        }
+        for (int i = scope.charNumStart; i < scope.lineStart.length; ++i) {
+            printf("^");
+        }
+        printf("  Line %5d: "SV_FMT"\n", scope.lineNumEnd + 1, SV_ARG(scope.lineEnd));
+        printf("               ");
+        for (size_t i = 0; i < scope.charNumEnd; ++i) {
+            printf("^");
+        }
+    }
+    printf("\n");
+}
+
+void printErrorMessage(char* fileName, Lex_Scope scope, char* fmt, ...) {
+    printf("%s:%d:%d: ERROR! ", fileName, scope.lineNumStart + 1, scope.charNumStart + 1);
+    va_list args;
+    va_start(args, fmt);
+    vprintf(fmt, args);
+    va_end(args);
+    printf(":\n");
+    printScope(scope);
 }
 
 
@@ -196,6 +250,40 @@ typedef struct {
     int intValue;
 } Token;
 
+inline Lex_Scope scopeToken(Token token) {
+    return (Lex_Scope){
+        .lineNumStart = token.lineNum,
+        .charNumStart = token.charNum,
+        .lineStart = token.line,
+        .lineNumEnd = token.lineNum,
+        .charNumEnd = token.charNum + token.text.length,
+        .lineEnd = token.line,
+    };
+}
+
+inline Lex_Scope scopeBetween(Token start, Token end) {
+    return (Lex_Scope){
+        .lineNumStart = start.lineNum,
+        .charNumStart = start.charNum,
+        .lineStart = start.line,
+        .lineNumEnd = end.lineNum,
+        .charNumEnd = end.charNum + end.text.length,
+        .lineEnd = end.line,
+    };
+}
+
+inline Lex_Scope scopeAfter(Token token) {
+    return (Lex_Scope){
+        .lineNumStart = token.lineNum,
+        .charNumStart = token.charNum + token.text.length + 1,
+        .lineStart = token.line,
+        .lineNumEnd = token.lineNum,
+        .charNumEnd = token.charNum + token.text.length + 2,
+        .lineEnd = token.line,
+    };
+}
+
+
 typedef struct {
     char* code;
     char* fileName;
@@ -204,7 +292,17 @@ typedef struct {
     String_View line;
 } Lexer;
 
-Lexer makeLexer(char* code, char* fileName) {
+inline Token makeToken(Lexer* lexer, Token_Type type, int textLength) {
+    return (Token){
+        .type = type,
+        .lineNum = lexer->lineNum,
+        .charNum = lexer->charNum,
+        .line = lexer->line,
+        .text = (String_View){lexer->code, textLength},
+    };
+}
+
+inline Lexer makeLexer(char* code, char* fileName) {
     return (Lexer){
         .code = code,
         .fileName = fileName,
@@ -214,7 +312,7 @@ Lexer makeLexer(char* code, char* fileName) {
     };
 }
 
-void lexerAdvance(Lexer* lexer, size_t steps) {
+inline void lexerAdvance(Lexer* lexer, size_t steps) {
     for (size_t i = 0; i < steps; ++i) {
         lexer->charNum++;
         if (*lexer->code == '\n') {
@@ -226,17 +324,7 @@ void lexerAdvance(Lexer* lexer, size_t steps) {
     }
 }
 
-inline Token makeToken(Lexer* lexer, Token_Type type, size_t textLength) {
-    return (Token){
-        .type = type,
-        .lineNum = lexer->lineNum,
-        .charNum = lexer->charNum,
-        .line = lexer->line,
-        .text = (String_View){lexer->code, textLength},
-    };
-}
-
-bool isLexemeTerminator(char c) {
+inline bool isLexemeTerminator(char c) {
     return isspace(c)
         || c == '\0'
         || c == ','
@@ -249,7 +337,7 @@ bool isLexemeTerminator(char c) {
 }
 
 Token getIntToken(Lexer* lexer) {
-    size_t intLength = 0;
+    int intLength = 0;
     bool negative = false;
     if (*lexer->code == '+') {
         intLength++;
@@ -297,8 +385,8 @@ Token getKeywordToken(Lexer* lexer) {
     return (Token){TOKEN_ERROR};
 }
 
-Token getIdentToken(Lexer* lexer) {
-    size_t identLength = 0;
+inline Token getIdentToken(Lexer* lexer) {
+    int identLength = 0;
     for (; !isLexemeTerminator(lexer->code[identLength]); ++identLength);
     Token token = makeToken(lexer, TOKEN_IDENT, identLength);
     lexerAdvance(lexer, identLength);
@@ -341,13 +429,21 @@ Token getToken(Lexer* lexer) {
             return result;
         }
         case ':': {
-            if (lexer->code[1] == ':') {
-                Token result = makeToken(lexer, TOKEN_DCOLON, 2);
-                lexerAdvance(lexer, 2);
-                return result;
+            if (lexer->code[1] != ':') {
+                Lex_Scope scope = {
+                    .lineNumStart = lexer->lineNum,
+                    .charNumStart = lexer->charNum,
+                    .lineStart = lexer->line,
+                    .lineNumEnd = lexer->lineNum,
+                    .charNumEnd = lexer->charNum + 1,
+                    .lineEnd = lexer->line,
+                };
+                printErrorMessage(lexer->fileName, scope, "Invalid token \":\". Maybe you meant \"::\"?");
             }
+            Token result = makeToken(lexer, TOKEN_DCOLON, 2);
+            lexerAdvance(lexer, 2);
+            return result;
             //TODO: This is where the lexer will need error handling
-            assert(lexer->code[1] == ':');
             break;
         }
         case ';': {
@@ -368,10 +464,9 @@ Token getToken(Lexer* lexer) {
             return result;
         } 
     }
-    assert(false && "unreachable");
 }
 
-Token peekToken(Lexer* lexer) {
+inline Token peekToken(Lexer* lexer) {
     Lexer newLexer = *lexer;
     Token token = getToken(&newLexer);
     return token;
@@ -428,80 +523,6 @@ void printToken(Token token) {
 // Parser API //
 ////////////////
 
-typedef struct {
-    size_t lineNumStart;
-    size_t charNumStart;
-    String_View lineStart;
-    size_t lineNumEnd;
-    size_t charNumEnd;
-    String_View lineEnd;
-} Lex_Scope;
-
-void printScope(Lex_Scope scope) {
-    if (scope.lineNumStart == scope.lineNumEnd) {
-        printf("  "SV_FMT"\n", SV_ARG(scope.lineStart));
-        printf("  ");
-        // This loop starts at one since the charNums in scopes are 1-indexed.
-        for (size_t i = 1; i < scope.charNumStart; ++i) {
-            printf(" ");
-        }
-        for (size_t i = 0; i < scope.charNumEnd - scope.charNumStart; ++i) {
-            printf("^");
-        }
-    }
-    else {
-        printf("  Line %5zu: "SV_FMT"\n", scope.lineNumStart, SV_ARG(scope.lineStart));
-        printf("   ...         ");
-        // This loop starts at one since the charNums in scopes are 1-indexed.
-        for (size_t i = 1; i < scope.charNumStart; ++i) {
-            printf(" ");
-        }
-        for (size_t i = scope.charNumStart; i < scope.lineStart.length; ++i) {
-            printf("^");
-        }
-        printf("  Line %5zu: "SV_FMT"\n", scope.lineNumStart, SV_ARG(scope.lineStart));
-        printf("               ");
-        // This loop starts at one since the charNums in scopes are 1-indexed.
-        for (size_t i = 1; i < scope.charNumEnd; ++i) {
-            printf("^");
-        }
-    }
-    printf("\n");
-}
-
-Lex_Scope scopeToken(Token token) {
-    return (Lex_Scope){
-        .lineNumStart = token.lineNum,
-        .charNumStart = token.charNum,
-        .lineStart = token.line,
-        .lineNumEnd = token.lineNum,
-        .charNumEnd = token.charNum + token.text.length,
-        .lineEnd = token.line,
-    };
-}
-
-Lex_Scope scopeBetween(Token start, Token end) {
-    return (Lex_Scope){
-        .lineNumStart = start.lineNum,
-        .charNumStart = start.charNum,
-        .lineStart = start.line,
-        .lineNumEnd = end.lineNum,
-        .charNumEnd = end.charNum + end.text.length,
-        .lineEnd = end.line,
-    };
-}
-
-Lex_Scope scopeAfter(Token token) {
-    return (Lex_Scope){
-        .lineNumStart = token.lineNum,
-        .charNumStart = token.charNum + token.text.length + 1,
-        .lineStart = token.line,
-        .lineNumEnd = token.lineNum,
-        .charNumEnd = token.charNum + token.text.length + 2,
-        .lineEnd = token.line,
-    };
-}
-
 typedef enum {
     NODE_FUNCTION,
     NODE_ARGS,          // Argument lists to functions
@@ -548,7 +569,7 @@ typedef struct {
     size_t capacity;
 } AST_Node_List;
 
-AST_Node_List makeNodeList(size_t capacity) {
+inline AST_Node_List makeNodeList(size_t capacity) {
     return (AST_Node_List){
         .nodes = malloc(capacity * sizeof(AST_Node)),
         .nodeCount = 0,
@@ -556,13 +577,34 @@ AST_Node_List makeNodeList(size_t capacity) {
     };
 }
 
-size_t addNode(AST_Node_List* list, AST_Node node) {
+inline size_t addNode(AST_Node_List* list, AST_Node node) {
     if (list->nodeCount == list->capacity) {
         list->capacity *= 2;
         list->nodes = realloc(list->nodes, list->capacity * sizeof(AST_Node));
     }
     list->nodes[list->nodeCount++] = node;
     return list->nodeCount - 1;
+}
+
+void recoverByEatUntil(Lexer* lexer, Token_Type wanted) {
+    Token token = getToken(lexer);
+    while (token.type != wanted && token.type != TOKEN_EOF) {
+        token = getToken(lexer);
+    }
+    if (token.type == TOKEN_EOF) {
+        exit(1);
+    }
+}
+
+void recoverByEatUpTo(Lexer* lexer, Token_Type wanted) {
+    Token peeked = peekToken(lexer);
+    while (peeked.type != wanted && peeked.type != TOKEN_EOF) {
+        getToken(lexer);
+        peeked = peekToken(lexer);
+    }
+    if (peeked.type == TOKEN_EOF) {
+        exit(1);
+    }
 }
 
 size_t parseExpr(AST_Node_List* list, Lexer* lexer);
@@ -582,9 +624,11 @@ size_t parseExpr(AST_Node_List* list, Lexer* lexer) {
             node.data.intValue = token.intValue;
             return addNode(list, node);
         }
-        default:
-            printf("Unexpected token type: %d\n", token.type);
-            assert(false && "This isn't an expression (parseExpr)");
+        default: {
+            printErrorMessage(lexer->fileName, scopeToken(token), "Expected a valid expression, got \""SV_FMT"\"", SV_ARG(token.text));
+            recoverByEatUpTo(lexer, TOKEN_SEMICOLON);
+            return SIZE_MAX;
+        }
     }
 }
 
@@ -597,35 +641,46 @@ size_t parseStatement(AST_Node_List* list, Lexer* lexer) {
             node.data.returnExpr = parseExpr(list, lexer);
             size_t result = addNode(list, node);
             token = getToken(lexer);
-            assert(token.type == TOKEN_SEMICOLON);
+            if (token.type != TOKEN_SEMICOLON) {
+                printErrorMessage(lexer->fileName, scopeAfter(token), "Expected a \";\", but got none");
+                return SIZE_MAX;
+            }
             return result;
         }
-        default:
-            assert(false && "This isn't a statement (parseStatement)");
+        default: {
+            printErrorMessage(lexer->fileName, scopeToken(token), "Expected the start of a valid statement, got \""SV_FMT"\"", SV_ARG(token.text));
+            recoverByEatUntil(lexer, TOKEN_SEMICOLON);
+            return SIZE_MAX;
+       }
     }
 }
 
 size_t parseStatements(AST_Node_List* list, Lexer* lexer, bool* success) {
+    *success = true;
+
     if (peekToken(lexer).type == TOKEN_RBRACE) {
         getToken(lexer); // Eat the '}'
-        *success = true;
         return SIZE_MAX;
     }
 
     AST_Node node;
     node.type = NODE_STATEMENTS;
     node.data.statementStatement = parseStatement(list, lexer);
-    assert(node.data.statementStatement != SIZE_MAX);
+    if (node.data.statementStatement == SIZE_MAX) {
+        *success = false;
+    }
     size_t head = addNode(list, node);
     size_t curr = head;
 
     while (peekToken(lexer).type != TOKEN_RBRACE) {
         node.data.statementStatement = parseStatement(list, lexer);
+        if (node.data.statementStatement == SIZE_MAX) {
+            *success = false;
+        }
         list->nodes[curr].data.statementNext = addNode(list, node);
         curr = list->nodes[curr].data.statementNext;
     }
     list->nodes[curr].data.statementNext = SIZE_MAX;
-    *success = true;
     return head;
 }
 
@@ -635,18 +690,22 @@ size_t parseScope(AST_Node_List* list, Lexer* lexer) {
 
     bool success;
     node.data.scopeStatements = parseStatements(list, lexer, &success);
-    assert(success);
 
-    return addNode(list, node);
+    return success ? addNode(list, node) : SIZE_MAX;
 }
 
 size_t parseArgs(AST_Node_List* list, Lexer* lexer, bool* success) {
+    *success = true;
+
     Token token = getToken(lexer);
     if (token.type == TOKEN_RPAREN) {
-        *success = true;
         return SIZE_MAX;
     }
-    assert(token.type == TOKEN_IDENT);
+    if (token.type != TOKEN_IDENT) {
+        printErrorMessage(lexer->fileName, scopeToken(token), "Expected an identifier in argument list, got \""SV_FMT"\"", SV_ARG(token.text));
+        recoverByEatUntil(lexer, TOKEN_IDENT);
+        *success = false;
+    }
 
     AST_Node node;
     node.type = NODE_ARGS;
@@ -656,10 +715,18 @@ size_t parseArgs(AST_Node_List* list, Lexer* lexer, bool* success) {
 
     token = getToken(lexer);
     while (token.type != TOKEN_RPAREN) {
-        assert(token.type == TOKEN_COMMA);
+        if (token.type != TOKEN_COMMA) {
+            printErrorMessage(lexer->fileName, scopeToken(token), "Expected \",\" separating arguments in argument list, got \""SV_FMT"\"", SV_ARG(token.text));
+            recoverByEatUntil(lexer, TOKEN_COMMA);
+            *success = false;
+        }
 
         token = getToken(lexer);
-        assert(token.type == TOKEN_IDENT);
+        if (token.type != TOKEN_IDENT) {
+            printErrorMessage(lexer->fileName, scopeToken(token), "Expected an identifier in argument list, got \""SV_FMT"\"", SV_ARG(token.text));
+            recoverByEatUntil(lexer, TOKEN_IDENT);
+            *success = false;
+        }
         
         node.data.argArg = token.text;
         list->nodes[curr].data.argNext = addNode(list, node);
@@ -668,38 +735,62 @@ size_t parseArgs(AST_Node_List* list, Lexer* lexer, bool* success) {
         token = getToken(lexer);
     }
     list->nodes[curr].data.argNext = SIZE_MAX;
-    *success = true;
     return head;
 }
 
 size_t parseFunction(AST_Node_List* list, Lexer* lexer) {
-    AST_Node result;
-    result.type = NODE_FUNCTION;
+    bool success = true;
+    AST_Node node;
+    node.type = NODE_FUNCTION;
 
     Token token = getToken(lexer);
-    assert(token.type == TOKEN_IDENT);
-    result.data.functionName = token.text;
+    if (token.type != TOKEN_IDENT) {
+        printErrorMessage(lexer->fileName, scopeToken(token), "Expected an identifier in function definition, got \""SV_FMT"\"", SV_ARG(token.text));
+        recoverByEatUntil(lexer, TOKEN_IDENT);
+        success = false;
+    }
+    node.data.functionName = token.text;
 
     token = getToken(lexer);
-    assert(token.type == TOKEN_DCOLON);
+    if (token.type != TOKEN_DCOLON) {
+        printErrorMessage(lexer->fileName, scopeToken(token), "Expected \"::\" in function definition, got \""SV_FMT"\"", SV_ARG(token.text));
+        recoverByEatUntil(lexer, TOKEN_DCOLON);
+        success = false;
+    }
 
     token = getToken(lexer);
-    assert(token.type == TOKEN_FUNC_KEYWORD);
+    if (token.type != TOKEN_FUNC_KEYWORD) {
+        printErrorMessage(lexer->fileName, scopeToken(token), "Expected \"func\" keyword in function definition, got \""SV_FMT"\"", SV_ARG(token.text));
+        recoverByEatUntil(lexer, TOKEN_FUNC_KEYWORD);
+        success = false;
+    }
 
     token = getToken(lexer);
-    assert(token.type == TOKEN_LPAREN);
+    if (token.type != TOKEN_LPAREN) {
+        printErrorMessage(lexer->fileName, scopeToken(token), "Expected argument list (starting with \"(\") in function definition, got \""SV_FMT"\"", SV_ARG(token.text));
+        recoverByEatUntil(lexer, TOKEN_LPAREN);
+        success = false;
+    }
 
-    bool success;
-    result.data.functionArgs = parseArgs(list, lexer, &success);
-    assert(success);
+    bool argsSuccess;
+    node.data.functionArgs = parseArgs(list, lexer, &argsSuccess);
+    if (!argsSuccess) {
+        success = false;
+    }
 
     token = getToken(lexer);
-    assert(token.type == TOKEN_LBRACE);
+    if (token.type != TOKEN_LBRACE) {
+        printErrorMessage(lexer->fileName, scopeToken(token), "Expected function body (starting with \"{\") in function definition, got \""SV_FMT"\"", SV_ARG(token.text));
+        recoverByEatUntil(lexer, TOKEN_LBRACE);
+        success = false;
+    }
 
-    result.data.functionBody = parseScope(list, lexer);
-    assert(success);
+    node.data.functionBody = parseScope(list, lexer);
+    if (node.data.functionBody == SIZE_MAX) {
+        success = false;
+    }
 
-    return addNode(list, result);
+    return success ? addNode(list, node) : SIZE_MAX;
 }
 
 void printIndented(int indent, char* fmt, ...) {
@@ -785,7 +876,7 @@ void printASTIndented(int indent, AST_Node_List list, size_t root) {
     }
 }
 
-void printAST(AST_Node_List list, size_t root) {
+inline void printAST(AST_Node_List list, size_t root) {
     printASTIndented(0, list, root);
 }
 
