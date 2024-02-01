@@ -731,6 +731,8 @@ void recoverByEatUpTo(Lexer* lexer, Token_Type wanted) {
     }
 }
 
+size_t parseTerm(AST_Node_List* list, Lexer* lexer);
+size_t parseBracketedExpr(AST_Node_List* list, Lexer* lexer);
 size_t parseExpr(AST_Node_List* list, Lexer* lexer, int precedence);
 size_t parseStatement(AST_Node_List* list, Lexer* lexer);
 size_t parseStatments(AST_Node_List* list, Lexer* lexer, bool* success);
@@ -769,13 +771,34 @@ size_t parseIncreasingPrecedence(AST_Node_List* list, Lexer* lexer, size_t left,
 }
 
 size_t parseExpr(AST_Node_List* list, Lexer* lexer, int precedence) {
+    Token peeked = peekToken(lexer);
+    if (peeked.type == TOKEN_LPAREN) {
+        getToken(lexer); // Eat the '('
+        size_t inner = parseExpr(list, lexer, -1);
+        if (inner == SIZE_MAX) {
+            return SIZE_MAX;
+        }
+
+        Token token = getToken(lexer);
+        if (token.type != TOKEN_RPAREN) {
+            printErrorMessage(lexer->fileName, scopeToken(token), "Expected \")\", but got \""SV_FMT"\"", SV_ARG(token.text));
+            recoverByEatUpTo(lexer, TOKEN_SEMICOLON);
+            return SIZE_MAX;
+        }
+        return inner;
+    }
+
     size_t term = parseTerm(list, lexer);
     if (term == SIZE_MAX) {
         return SIZE_MAX;
     }
-    Token peeked = peekToken(lexer);
+
+    peeked = peekToken(lexer);
     while (isOperator(peeked)) {
         size_t op = parseIncreasingPrecedence(list, lexer, term, precedence);
+        if (op == SIZE_MAX) {
+            return SIZE_MAX;
+        }
         if (op == term) {
             return term;
         }
