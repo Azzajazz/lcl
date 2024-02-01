@@ -357,7 +357,7 @@ Token getIntToken(Lexer* lexer) {
         negative = true;
         intLength++;
     }
-    bool zero = lexer->code[intLength == '0'] && isLexemeTerminator(lexer->code[intLength + 1]);
+    bool zero = lexer->code[intLength] == '0' && isLexemeTerminator(lexer->code[intLength + 1]);
     if (!zero && (lexer->code[intLength] < '1' || lexer->code[intLength] > '9')) {
         return (Token){TOKEN_ERROR};
     }
@@ -583,6 +583,9 @@ typedef enum {
 
     // Literals
     NODE_INT,
+
+    // Identifiers
+    NODE_IDENT
 } Node_Type;
 
 typedef union {
@@ -639,6 +642,74 @@ inline size_t addNode(AST_Node_List* list, AST_Node node) {
     return list->nodeCount - 1;
 }
 
+inline size_t addIntNode(AST_Node_List* list, int value) {
+    AST_Node node;
+    node.type = NODE_INT;
+    node.data.intValue = value;
+    return addNode(list, node);
+}
+
+inline size_t addIdentNode(AST_Node_List* list, String_View name) {
+    AST_Node node;
+    node.type = NODE_IDENT;
+    node.data.identName = name;
+    return addNode(list, node);
+}
+
+inline size_t addUnaryNode(AST_Node_List* list, Node_Type type, size_t child) {
+    AST_Node node;
+    node.type = type;
+    switch (node.type) {
+        case NODE_RETURN:
+            node.data.returnExpr = child;
+            break;
+        default:
+            printf("Unknown unary node: %d\n", node.type);
+            assert(false && "Called with a node type that is not unary, or non-exhaustive cases (addUnaryNode)");
+    }
+    return addNode(list, node);
+}
+
+inline size_t addBinaryOpNode(AST_Node_List* list, size_t left, Token token, size_t right) {
+    assert(isOperator(token));
+    AST_Node node;
+    switch (token.type) {
+        case TOKEN_PLUS:
+            node.type = NODE_PLUS;
+            break;
+        case TOKEN_MINUS:
+            node.type = NODE_MINUS;
+            break;
+        case TOKEN_STAR:
+            node.type = NODE_TIMES;
+            break;
+        case TOKEN_SLASH:
+            node.type = NODE_DIVIDE;
+            break;
+        default:
+            printf("Unknown token operator type: %d\n", token.type);
+            assert(false && "Unexhausted cases (addBinaryOpNode)");
+    }
+    node.data.binaryOpLeft = left;
+    node.data.binaryOpRight = right;
+    return addNode(list, node);
+}
+
+int getPrecedence(Token token) {
+    assert(isOperator(token));
+    switch (token.type) {
+        case TOKEN_PLUS:
+        case TOKEN_MINUS:
+            return 10;
+        case TOKEN_STAR:
+        case TOKEN_SLASH:
+            return 20;
+        default:
+            printf("Unknown token operator type: %d\n", token.type);
+            assert(false && "Unexhausted cases (getPrecedence)");
+    }
+}
+
 void recoverByEatUntil(Lexer* lexer, Token_Type wanted) {
     Token token = getToken(lexer);
     while (token.type != wanted && token.type != TOKEN_EOF) {
@@ -660,73 +731,83 @@ void recoverByEatUpTo(Lexer* lexer, Token_Type wanted) {
     }
 }
 
-size_t parseExpr(AST_Node_List* list, Lexer* lexer);
+size_t parseExpr(AST_Node_List* list, Lexer* lexer, int precedence);
 size_t parseStatement(AST_Node_List* list, Lexer* lexer);
 size_t parseStatments(AST_Node_List* list, Lexer* lexer, bool* success);
 size_t parseScope(AST_Node_List* list, Lexer* lexer);
 size_t parseArgs(AST_Node_List* list, Lexer* lexer, bool* success);
 size_t parseFunction(AST_Node_List* list, Lexer* lexer);
 
-size_t parsePlus(AST_Node_List* list, Lexer* lexer, size_t left) {
-    Token token = getToken(lexer);
-    assert(token.type == TOKEN_PLUS);
-
-    token = getToken(lexer);
-    assert(token.type == TOKEN_INT); // Temporary
-    AST_Node node;
-    node.type = NODE_INT;
-    node.data.intValue = token.intValue;
-    size_t right = addNode(list, node);
-
-    node.type = NODE_PLUS;
-    node.data.binaryOpLeft = left;
-    node.data.binaryOpRight = right;
-    size_t op = addNode(list, node);
-    if (peekToken(lexer).type == TOKEN_PLUS) {
-        return parsePlus(list, lexer, op);
-    }
-    else {
-        return op;
-    }
-}
-
-size_t parseExpr(AST_Node_List* list, Lexer* lexer) {
+size_t parseTerm(AST_Node_List* list, Lexer* lexer) {
     Token token = getToken(lexer);
     switch (token.type) {
-        case TOKEN_INT: {
-            AST_Node node;
-            node.type = NODE_INT;
-            node.data.intValue = token.intValue;
-            size_t first = addNode(list, node);
-            if (peekToken(lexer).type == TOKEN_PLUS) {
-                return parsePlus(list, lexer, first);
-            }
-            else {
-                return first;
-            }
-        }
-        default: {
-            printErrorMessage(lexer->fileName, scopeToken(token), "Expected a valid expression, got \""SV_FMT"\"", SV_ARG(token.text));
+        case TOKEN_INT:
+            return addIntNode(list, token.intValue);
+        case TOKEN_IDENT:
+            return addIdentNode(list, token.text);
+        default:
+            printErrorMessage(lexer->fileName, scopeToken(token), "Expected an integer or identifier, but got \""SV_FMT"\"", SV_ARG(token.text));
             recoverByEatUpTo(lexer, TOKEN_SEMICOLON);
+    }
+    return addIntNode(list, token.intValue);
+}
+
+size_t parseIncreasingPrecedence(AST_Node_List* list, Lexer* lexer, size_t left, int precedence) {
+    Token token = peekToken(lexer);
+    assert(isOperator(token));
+
+    int thisPrecedence = getPrecedence(token);
+    if (thisPrecedence > precedence) {
+        getToken(lexer); // Eat the operator
+        size_t right = parseExpr(list, lexer, thisPrecedence);
+        if (right == SIZE_MAX) {
             return SIZE_MAX;
         }
+        return addBinaryOpNode(list, left, token, right);
     }
+    return left;
+}
+
+size_t parseExpr(AST_Node_List* list, Lexer* lexer, int precedence) {
+    size_t term = parseTerm(list, lexer);
+    if (term == SIZE_MAX) {
+        return SIZE_MAX;
+    }
+    Token peeked = peekToken(lexer);
+    while (isOperator(peeked)) {
+        size_t op = parseIncreasingPrecedence(list, lexer, term, precedence);
+        if (op == term) {
+            return term;
+        }
+        term = op;
+        peeked = peekToken(lexer);
+    }
+    
+    if (peeked.type == TOKEN_INT || peeked.type == TOKEN_IDENT) {
+        printErrorMessage(lexer->fileName, scopeToken(peeked), "Expected an operator, but got %d", peeked.intValue);
+        recoverByEatUpTo(lexer, TOKEN_SEMICOLON);
+        return SIZE_MAX;
+    }
+   
+    return term;
 }
 
 size_t parseStatement(AST_Node_List* list, Lexer* lexer) {
+    bool success = true;
     Token token = getToken(lexer);
     switch (token.type) {
         case TOKEN_RETURN_KEYWORD: {
-            AST_Node node;
-            node.type = NODE_RETURN;
-            node.data.returnExpr = parseExpr(list, lexer);
-            size_t result = addNode(list, node);
+            size_t inner = parseExpr(list, lexer, -1);
+            if (inner == SIZE_MAX) {
+               success = false; 
+            }
+            size_t result = addUnaryNode(list, NODE_RETURN, inner);
             token = getToken(lexer);
             if (token.type != TOKEN_SEMICOLON) {
                 printErrorMessage(lexer->fileName, scopeAfter(token), "Expected a \";\", but got none");
                 return SIZE_MAX;
             }
-            return result;
+            return success ? result : SIZE_MAX;
         }
         default: {
             printErrorMessage(lexer->fileName, scopeToken(token), "Expected the start of a valid statement, got \""SV_FMT"\"", SV_ARG(token.text));
@@ -935,6 +1016,38 @@ void printASTIndented(int indent, AST_Node_List list, size_t root) {
             }
             break;
         }
+        case NODE_PLUS: {
+            printIndented(indent, "type=PLUS, left=(\n");
+            printASTIndented(indent + 1, list, node.data.binaryOpLeft);
+            printIndented(indent, "), right=(\n");
+            printASTIndented(indent + 1, list, node.data.binaryOpRight);
+            printIndented(indent, ")\n");
+            break;
+        }
+        case NODE_MINUS: {
+            printIndented(indent, "type=MINUS, left=(\n");
+            printASTIndented(indent + 1, list, node.data.binaryOpLeft);
+            printIndented(indent, "), right=(\n");
+            printASTIndented(indent + 1, list, node.data.binaryOpRight);
+            printIndented(indent, ")\n");
+            break;
+        }
+        case NODE_TIMES: {
+            printIndented(indent, "type=TIMES, left=(\n");
+            printASTIndented(indent + 1, list, node.data.binaryOpLeft);
+            printIndented(indent, "), right=(\n");
+            printASTIndented(indent + 1, list, node.data.binaryOpRight);
+            printIndented(indent, ")\n");
+            break;
+        }
+        case NODE_DIVIDE: {
+            printIndented(indent, "type=DIVIDE, left=(\n");
+            printASTIndented(indent + 1, list, node.data.binaryOpLeft);
+            printIndented(indent, "), right=(\n");
+            printASTIndented(indent + 1, list, node.data.binaryOpRight);
+            printIndented(indent, ")\n");
+            break;
+        }
         case NODE_RETURN: {
             printIndented(indent, "type=RETURN, expr=");
             if (node.data.returnExpr == SIZE_MAX) {
@@ -951,15 +1064,12 @@ void printASTIndented(int indent, AST_Node_List list, size_t root) {
             printIndented(indent, "type=INT, value=%d\n", node.data.intValue);
             break;
         }
-        case NODE_PLUS: {
-            printIndented(indent, "type=PLUS, left=(\n");
-            printASTIndented(indent + 1, list, node.data.binaryOpLeft);
-            printIndented(indent, "), right=(\n");
-            printASTIndented(indent + 1, list, node.data.binaryOpRight);
+        case NODE_IDENT: {
+            printIndented(indent, "type=IDENT, name="SV_FMT"\n", SV_ARG(node.data.identName));
             break;
         }
         default:
-            printf("%d\n", node.type);
+            printf("Unknown node type: %d\n", node.type);
             assert(false && "Non-exhaustive cases in printASTIndented");
     }
 }
@@ -974,28 +1084,61 @@ inline void printAST(AST_Node_List list, size_t root) {
 // Emitter API //
 /////////////////
 
+void emitTerm(FILE* file, AST_Node_List list, size_t root);
 void emitExpr(FILE* file, AST_Node_List list, size_t root);
 void emitStatement(int indent, FILE* file, AST_Node_List list, size_t root);
 void emitStatements(int indent, FILE* file, AST_Node_List list, size_t root);
 void emitScope(int indent, FILE* file, AST_Node_List list, size_t root);
 void emitFunction(FILE* file, AST_Node_List list, size_t root);
 
+void emitTerm(FILE* file, AST_Node_List list, size_t root) {
+    AST_Node term = list.nodes[root];
+    switch (term.type) {
+        case NODE_INT: {
+            tryFPrintf(file, "%d", term.data.intValue);
+            break;
+        }
+        case NODE_IDENT: {
+            tryFPrintf(file, SV_FMT, SV_ARG(term.data.identName));
+            break;
+        }
+        default:
+            printf("Unknown node term type: %d\n", term.type);
+            assert(false && "Called with a non-term node or non-exhaustive cases (emitTerm)");
+    }
+}
+
 void emitExpr(FILE* file, AST_Node_List list, size_t root) {
     AST_Node expr = list.nodes[root];
     switch (expr.type) {
-        case NODE_INT: {
-            tryFPrintf(file, "%d", expr.data.intValue);
-            break;
-        }
         case NODE_PLUS: {
             emitExpr(file, list, expr.data.binaryOpLeft);
             tryFPuts(" + ", file);
             emitExpr(file, list, expr.data.binaryOpRight);
             break;
         }
-        default:
-            printf("Unexpected node type: %d\n", expr.type);
-            assert(false && "This is not an expression! (emitExpr)");
+        case NODE_MINUS: {
+            emitExpr(file, list, expr.data.binaryOpLeft);
+            tryFPuts(" - ", file);
+            emitExpr(file, list, expr.data.binaryOpRight);
+            break;
+        }
+        case NODE_TIMES: {
+            emitExpr(file, list, expr.data.binaryOpLeft);
+            tryFPuts(" * ", file);
+            emitExpr(file, list, expr.data.binaryOpRight);
+            break;
+        }
+        case NODE_DIVIDE: {
+            emitExpr(file, list, expr.data.binaryOpLeft);
+            tryFPuts(" / ", file);
+            emitExpr(file, list, expr.data.binaryOpRight);
+            break;
+        }
+        default: {
+            emitTerm(file, list, root);
+            break;
+        }
     }
 }
 
