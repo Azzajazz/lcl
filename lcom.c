@@ -619,6 +619,13 @@ typedef struct {
     Node_Data data;
 } AST_Node;
 
+bool isNodeOperator(Node_Type type) {
+    return type == NODE_PLUS
+        || type == NODE_MINUS
+        || type == NODE_TIMES
+        || type == NODE_DIVIDE;
+}
+
 typedef struct {
     AST_Node* nodes;
     size_t nodeCount;
@@ -695,9 +702,8 @@ inline size_t addBinaryOpNode(AST_Node_List* list, size_t left, Token token, siz
     return addNode(list, node);
 }
 
-int getPrecedence(Token token) {
-    assert(isOperator(token));
-    switch (token.type) {
+int getPrecedence(Token_Type type) {
+    switch (type) {
         case TOKEN_PLUS:
         case TOKEN_MINUS:
             return 10;
@@ -705,8 +711,22 @@ int getPrecedence(Token token) {
         case TOKEN_SLASH:
             return 20;
         default:
-            printf("Unknown token operator type: %d\n", token.type);
-            assert(false && "Unexhausted cases (getPrecedence)");
+            printf("Unknown token operator type: %d\n", type);
+            assert(false && "Called with a non-operator token or non-exhaustive cases (getPrecedence)");
+    }
+}
+
+int getNodePrecedence(Node_Type type) {
+    switch (type) {
+        case NODE_PLUS:
+        case NODE_MINUS:
+            return 10;
+        case NODE_TIMES:
+        case NODE_DIVIDE:
+            return 20;
+        default:
+            printf("Unknown node operator type: %d\n", type);
+            assert(false && "Called with a non-operator node or non-exhaustive cases (getNodePrecedence)");
     }
 }
 
@@ -758,7 +778,7 @@ size_t parseIncreasingPrecedence(AST_Node_List* list, Lexer* lexer, size_t left,
     Token token = peekToken(lexer);
     assert(isOperator(token));
 
-    int thisPrecedence = getPrecedence(token);
+    int thisPrecedence = getPrecedence(token.type);
     if (thisPrecedence > precedence) {
         getToken(lexer); // Eat the operator
         size_t right = parseExpr(list, lexer, thisPrecedence);
@@ -1108,7 +1128,7 @@ inline void printAST(AST_Node_List list, size_t root) {
 /////////////////
 
 void emitTerm(FILE* file, AST_Node_List list, size_t root);
-void emitExpr(FILE* file, AST_Node_List list, size_t root);
+void emitExpr(FILE* file, AST_Node_List list, size_t root, int precedence);
 void emitStatement(int indent, FILE* file, AST_Node_List list, size_t root);
 void emitStatements(int indent, FILE* file, AST_Node_List list, size_t root);
 void emitScope(int indent, FILE* file, AST_Node_List list, size_t root);
@@ -1131,37 +1151,47 @@ void emitTerm(FILE* file, AST_Node_List list, size_t root) {
     }
 }
 
-void emitExpr(FILE* file, AST_Node_List list, size_t root) {
+void emitExpr(FILE* file, AST_Node_List list, size_t root, int precedence) {
     AST_Node expr = list.nodes[root];
-    switch (expr.type) {
-        case NODE_PLUS: {
-            emitExpr(file, list, expr.data.binaryOpLeft);
-            tryFPuts(" + ", file);
-            emitExpr(file, list, expr.data.binaryOpRight);
-            break;
+    if (isNodeOperator(expr.type)) {
+        int thisPrecedence = getNodePrecedence(expr.type);
+        if (thisPrecedence < precedence) {
+            tryFPuts("(", file);
         }
-        case NODE_MINUS: {
-            emitExpr(file, list, expr.data.binaryOpLeft);
-            tryFPuts(" - ", file);
-            emitExpr(file, list, expr.data.binaryOpRight);
-            break;
+
+        switch (expr.type) {
+            case NODE_PLUS: {
+                emitExpr(file, list, expr.data.binaryOpLeft, thisPrecedence);
+                tryFPuts(" + ", file);
+                emitExpr(file, list, expr.data.binaryOpRight, thisPrecedence);
+                break;
+            }
+            case NODE_MINUS: {
+                emitExpr(file, list, expr.data.binaryOpLeft, thisPrecedence);
+                tryFPuts(" - ", file);
+                emitExpr(file, list, expr.data.binaryOpRight, thisPrecedence);
+                break;
+            }
+            case NODE_TIMES: {
+                emitExpr(file, list, expr.data.binaryOpLeft, thisPrecedence);
+                tryFPuts(" * ", file);
+                emitExpr(file, list, expr.data.binaryOpRight, thisPrecedence);
+                break;
+            }
+            case NODE_DIVIDE: {
+                emitExpr(file, list, expr.data.binaryOpLeft, thisPrecedence);
+                tryFPuts(" / ", file);
+                emitExpr(file, list, expr.data.binaryOpRight, thisPrecedence);
+                break;
+            }
         }
-        case NODE_TIMES: {
-            emitExpr(file, list, expr.data.binaryOpLeft);
-            tryFPuts(" * ", file);
-            emitExpr(file, list, expr.data.binaryOpRight);
-            break;
+
+        if (thisPrecedence < precedence) {
+            tryFPuts(")", file);
         }
-        case NODE_DIVIDE: {
-            emitExpr(file, list, expr.data.binaryOpLeft);
-            tryFPuts(" / ", file);
-            emitExpr(file, list, expr.data.binaryOpRight);
-            break;
-        }
-        default: {
-            emitTerm(file, list, root);
-            break;
-        }
+    }
+    else {
+        emitTerm(file, list, root);
     }
 }
 
@@ -1170,7 +1200,7 @@ void emitStatement(int indent, FILE* file, AST_Node_List list, size_t root) {
     switch (statement.type) {
         case NODE_RETURN: {
             tryFPutsIndented(indent, "return ", file);
-            emitExpr(file, list, statement.data.returnExpr);
+            emitExpr(file, list, statement.data.returnExpr, -1);
             break;
         }
         default:
