@@ -224,16 +224,19 @@ typedef enum {
     TOKEN_RPAREN,
     TOKEN_LBRACE,
     TOKEN_RBRACE,
+    TOKEN_COLON,
     TOKEN_DCOLON,
     TOKEN_SEMICOLON,
     TOKEN_PLUS,
     TOKEN_MINUS,
     TOKEN_STAR,
     TOKEN_SLASH,
+    TOKEN_EQUALS,
 
     // Keyword tokens
     TOKEN_FUNC_KEYWORD,
     TOKEN_RETURN_KEYWORD,
+    TOKEN_INTTYPE_KEYWORD,
 
     // Identifiers
     TOKEN_IDENT,
@@ -392,6 +395,13 @@ Token getKeywordToken(Lexer* lexer) {
                 return token;
             }
         }
+        case 'i': {
+            if (strncmp(lexer->code, "int", 3) == 0 && isLexemeTerminator(lexer->code[3])) {
+                Token token = makeToken(lexer, TOKEN_INTTYPE_KEYWORD, 3);
+                lexerAdvance(lexer, 3);
+                return token;
+            }
+        }
     }
     return (Token){TOKEN_ERROR};
 }
@@ -440,22 +450,16 @@ Token getToken(Lexer* lexer) {
             return result;
         }
         case ':': {
+            Token result;
             if (lexer->code[1] != ':') {
-                Lex_Scope scope = {
-                    .lineNumStart = lexer->lineNum,
-                    .charNumStart = lexer->charNum,
-                    .lineStart = lexer->line,
-                    .lineNumEnd = lexer->lineNum,
-                    .charNumEnd = lexer->charNum + 1,
-                    .lineEnd = lexer->line,
-                };
-                printErrorMessage(lexer->fileName, scope, "Invalid token \":\". Maybe you meant \"::\"?");
+                result = makeToken(lexer, TOKEN_COLON, 1);
+                lexerAdvance(lexer, 1);
             }
-            Token result = makeToken(lexer, TOKEN_DCOLON, 2);
-            lexerAdvance(lexer, 2);
+            else {
+                result = makeToken(lexer, TOKEN_DCOLON, 2);
+                lexerAdvance(lexer, 2);
+            }
             return result;
-            //TODO: This is where the lexer will need error handling
-            break;
         }
         case ';': {
             Token result = makeToken(lexer, TOKEN_SEMICOLON, 1);
@@ -479,6 +483,11 @@ Token getToken(Lexer* lexer) {
         }
         case '/': {
             Token result = makeToken(lexer, TOKEN_SLASH, 1);
+            lexerAdvance(lexer, 1);
+            return result;
+        }
+        case '=': {
+            Token result = makeToken(lexer, TOKEN_EQUALS, 1);
             lexerAdvance(lexer, 1);
             return result;
         }
@@ -574,6 +583,8 @@ typedef enum {
     // Statements
     NODE_STATEMENTS, // Linked lists of statements
     NODE_RETURN,
+    NODE_DECLARATION,
+    NODE_ASSIGNMENT,
 
     // Expressions
     NODE_PLUS,
@@ -610,6 +621,14 @@ typedef union {
         size_t binaryOpRight;
     };
     size_t returnExpr;       // NODE_RETURN
+    struct {                 // NODE_DELCARATION
+        String_View declarationName;
+        String_View declarationType;
+    };
+    struct {                 // NODE_ASSIGNMENT
+        String_View assignmentName;
+        size_t assignmentExpr;
+    };
     String_View identName;   // NODE_IDENT
     int intValue;            // NODE_INT
 } Node_Data;
@@ -647,6 +666,22 @@ inline size_t addNode(AST_Node_List* list, AST_Node node) {
     }
     list->nodes[list->nodeCount++] = node;
     return list->nodeCount - 1;
+}
+
+inline size_t addDeclarationNode(AST_Node_List* list, String_View name, String_View type) {
+    AST_Node node;
+    node.type = NODE_DECLARATION;
+    node.data.declarationName = name;
+    node.data.declarationType = type;
+    return addNode(list, node);
+}
+
+inline size_t addAssignmentNode(AST_Node_List* list, String_View name, size_t expr) {
+    AST_Node node;
+    node.type = NODE_ASSIGNMENT;
+    node.data.assignmentName = name;
+    node.data.assignmentExpr = expr;
+    return addNode(list, node);
 }
 
 inline size_t addIntNode(AST_Node_List* list, int value) {
@@ -836,13 +871,13 @@ size_t parseExpr(AST_Node_List* list, Lexer* lexer, int precedence) {
 }
 
 size_t parseStatement(AST_Node_List* list, Lexer* lexer) {
-    bool success = true;
     Token token = getToken(lexer);
     switch (token.type) {
         case TOKEN_RETURN_KEYWORD: {
             size_t inner = parseExpr(list, lexer, -1);
             if (inner == SIZE_MAX) {
-               success = false; 
+               recoverByEatUntil(lexer, TOKEN_SEMICOLON);
+               return SIZE_MAX;
             }
             size_t result = addUnaryNode(list, NODE_RETURN, inner);
             token = getToken(lexer);
@@ -850,7 +885,41 @@ size_t parseStatement(AST_Node_List* list, Lexer* lexer) {
                 printErrorMessage(lexer->fileName, scopeAfter(token), "Expected a \";\", but got none");
                 return SIZE_MAX;
             }
-            return success ? result : SIZE_MAX;
+            return result;
+        }
+        case TOKEN_IDENT: {
+            String_View name = token.text;
+            token = getToken(lexer);
+            switch (token.type) {
+                case TOKEN_COLON: {
+                    token = getToken(lexer);
+                    if (token.type != TOKEN_INTTYPE_KEYWORD) {
+                        printErrorMessage(lexer->fileName, scopeToken(token), "Expected a type name, but got \""SV_FMT"\"", SV_ARG(token.text));
+                        recoverByEatUntil(lexer, TOKEN_SEMICOLON);
+                        return SIZE_MAX;
+                    }
+                    String_View type = token.text;
+                    token = getToken(lexer);
+                    if (token.type != TOKEN_SEMICOLON) {
+                        printErrorMessage(lexer->fileName, scopeAfter(token), "Expected a \";\", but got none");
+                        return SIZE_MAX;
+                    }
+                    return addDeclarationNode(list, name, type);
+                }
+                case TOKEN_EQUALS: {
+                    size_t expr = parseExpr(list, lexer, -1);
+                    if (expr == SIZE_MAX) {
+                        recoverByEatUntil(lexer, TOKEN_SEMICOLON);
+                        return SIZE_MAX;
+                    }
+                    token = getToken(lexer);
+                    if (token.type != TOKEN_SEMICOLON) {
+                        printErrorMessage(lexer->fileName, scopeAfter(token), "Expected a \";\", but got none");
+                        return SIZE_MAX;
+                    }
+                    return addAssignmentNode(list, name, expr);
+                }
+            }
         }
         default: {
             printErrorMessage(lexer->fileName, scopeToken(token), "Expected the start of a valid statement, got \""SV_FMT"\"", SV_ARG(token.text));
@@ -1059,6 +1128,28 @@ void printASTIndented(int indent, AST_Node_List list, size_t root) {
             }
             break;
         }
+        case NODE_RETURN: {
+            printIndented(indent, "type=RETURN, expr=");
+            if (node.data.returnExpr == SIZE_MAX) {
+                printf("NONE\n");
+            }
+            else {
+                printf("(\n");
+                printASTIndented(indent + 1, list, node.data.returnExpr);
+                printIndented(indent, ")\n");
+            }
+            break;
+        }
+        case NODE_DECLARATION: {
+            printIndented(indent, "type=DECLARATION, name="SV_FMT", type="SV_FMT"\n", SV_ARG(node.data.declarationName), SV_ARG(node.data.declarationType));
+            break;
+        }
+        case NODE_ASSIGNMENT: {
+            printIndented(indent, "type=ASSIGNMENT, name="SV_FMT", expr=(\n", SV_ARG(node.data.declarationName));
+            printASTIndented(indent + 1, list, node.data.assignmentExpr);
+            printIndented(indent, ")\n");
+            break;
+        }
         case NODE_PLUS: {
             printIndented(indent, "type=PLUS, left=(\n");
             printASTIndented(indent + 1, list, node.data.binaryOpLeft);
@@ -1089,18 +1180,6 @@ void printASTIndented(int indent, AST_Node_List list, size_t root) {
             printIndented(indent, "), right=(\n");
             printASTIndented(indent + 1, list, node.data.binaryOpRight);
             printIndented(indent, ")\n");
-            break;
-        }
-        case NODE_RETURN: {
-            printIndented(indent, "type=RETURN, expr=");
-            if (node.data.returnExpr == SIZE_MAX) {
-                printf("NONE\n");
-            }
-            else {
-                printf("(\n");
-                printASTIndented(indent + 1, list, node.data.returnExpr);
-                printIndented(indent, ")\n");
-            }
             break;
         }
         case NODE_INT: {
@@ -1203,9 +1282,18 @@ void emitStatement(int indent, FILE* file, AST_Node_List list, size_t root) {
             emitExpr(file, list, statement.data.returnExpr, -1);
             break;
         }
+        case NODE_DECLARATION: {
+            tryFPrintfIndented(indent, file, SV_FMT" "SV_FMT, SV_ARG(statement.data.declarationType), SV_ARG(statement.data.declarationName));
+            break;
+        }
+        case NODE_ASSIGNMENT: {
+            tryFPrintfIndented(indent, file, SV_FMT" = ", SV_ARG(statement.data.assignmentName));
+            emitExpr(file, list, statement.data.assignmentExpr, -1);
+            break;
+        }
         default:
             printf("Unexpected node type: %d\n", statement.type);
-            assert(false && "This is not a statement! (emitStatement)");
+            assert(false && "Not a statement type or non-exhaustive cases (emitStatement)");
     }
     tryFPuts(";\n", file);
 }
@@ -1251,7 +1339,7 @@ void emitFunction(FILE* file, AST_Node_List list, size_t root) {
 // Compile C code to executable
 
 int main() {
-    char* fileName = "simple.lcl";
+    char* fileName = "examples/simple.lcl";
     char* code = readEntireFile(fileName);
     Lexer lexer = makeLexer(code, fileName);
     AST_Node_List list = makeNodeList(8);
@@ -1260,7 +1348,7 @@ int main() {
         return 1;
     }
     printAST(list, function);
-    FILE* output = tryFOpen("simple.c", "wb");
+    FILE* output = tryFOpen("examples/simple.c", "wb");
     emitFunction(output, list, function);
     return 0;
 }

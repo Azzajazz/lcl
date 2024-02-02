@@ -4,5 +4,7 @@
 - None for now.
 
 ## Feature adds
-- Expression parsing past just single integers
 - Type information for functions and function arguments
+
+## Optimizations
+- Ring buffer in lexer so that peeked tokens aren't processed twice.
