@@ -1274,6 +1274,7 @@ void emitExpr(FILE* file, AST_Node_List list, size_t root, int precedence);
 void emitStatement(int indent, FILE* file, AST_Node_List list, size_t root);
 void emitStatements(int indent, FILE* file, AST_Node_List list, size_t root);
 void emitScope(int indent, FILE* file, AST_Node_List list, size_t root);
+void emitArgs(FILE* file, AST_Node_List list, size_t root);
 void emitFunction(FILE* file, AST_Node_List list, size_t root);
 
 void emitTerm(FILE* file, AST_Node_List list, size_t root) {
@@ -1384,13 +1385,39 @@ void emitScope(int indent, FILE* file, AST_Node_List list, size_t root) {
     tryFPutsIndented(indent, "}\n", file);
 }
 
+void emitArgs(FILE* file, AST_Node_List list, size_t root) {
+    if (root == SIZE_MAX) {
+        tryFPuts("()", file);
+        return;
+    }
+
+    tryFPuts("(", file);
+    AST_Node arg = list.nodes[root];
+    tryFPrintf(file, SV_FMT" "SV_FMT, SV_ARG(arg.data.argType), SV_ARG(arg.data.argName));
+    root = arg.data.argNext;
+    while (root != SIZE_MAX) {
+        arg = list.nodes[root];
+        tryFPrintf(file, ", "SV_FMT" "SV_FMT, SV_ARG(arg.data.argType), SV_ARG(arg.data.argName));
+        root = arg.data.argNext;
+    }
+    tryFPuts(")", file);
+}
+
 void emitFunction(FILE* file, AST_Node_List list, size_t root) {
     AST_Node function = list.nodes[root];
     assert(function.type == NODE_FUNCTION);
 
-    tryFPuts("int ", file);
-    svTryFWrite(function.data.functionName, file);
-    tryFPuts("() ", file);
+    if (svEqualsCStr(function.data.functionName, "main")) {
+        tryFPuts("int ", file);
+    }
+    else if (svEqualsCStr(function.data.functionRetType, "unit")) {
+        tryFPuts("void ", file);
+    }
+    else {
+        tryFPrintf(file, SV_FMT" ", SV_ARG(function.data.functionRetType));
+    }
+    tryFPrintf(file, SV_FMT, SV_ARG(function.data.functionName));
+    emitArgs(file, list, function.data.functionArgs);
     emitScope(0, file, list, function.data.functionBody);
 }
 
