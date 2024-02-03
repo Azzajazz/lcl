@@ -7,6 +7,9 @@
 - Control flow structures (branches + loops)
 - Check for use-before-declared, etc (sanitizer)
 - Type checking
+- Multiple function definitions
+- Function calls
+- Data structure definitions
 
 ## Optimizations
 - Ring buffer in lexer so that peeked tokens aren't processed twice.
