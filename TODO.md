@@ -1,10 +1,12 @@
 # TODO List
 
 ## Bug fixes
-- None for now.
+- Improvements on error messages
 
 ## Feature adds
-- Type information for functions and function arguments
+- Control flow structures (branches + loops)
+- Check for use-before-declared, etc (sanitizer)
+- Type checking
 
 ## Optimizations
 - Ring buffer in lexer so that peeked tokens aren't processed twice.

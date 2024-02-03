@@ -133,6 +133,10 @@ typedef struct {
 #define SV_FMT "%.*s"
 #define SV_ARG(sv) (sv).length, (sv).start
 
+String_View svFromCStr(char* cstr) {
+    return (String_View){cstr, (int)strlen(cstr)};
+}
+
 bool svEqualsCStr(String_View sv, char* cstr) {
     for (size_t i = 0; i < sv.length; ++i) {
         if (cstr[i] == '\0' || cstr[i] != sv.start[i]) {
@@ -232,6 +236,7 @@ typedef enum {
     TOKEN_STAR,
     TOKEN_SLASH,
     TOKEN_EQUALS,
+    TOKEN_ARROW,
 
     // Keyword tokens
     TOKEN_FUNC_KEYWORD,
@@ -472,8 +477,15 @@ Token getToken(Lexer* lexer) {
             return result;
         }
         case '-': {
-            Token result = makeToken(lexer, TOKEN_MINUS, 1);
-            lexerAdvance(lexer, 1);
+            Token result;
+            if (lexer->code[1] != '>') {
+                result = makeToken(lexer, TOKEN_MINUS, 1);
+                lexerAdvance(lexer, 1);
+            }
+            else {
+                result = makeToken(lexer, TOKEN_ARROW, 2);
+                lexerAdvance(lexer, 2);
+            }
             return result;
         }
         case '*': {
@@ -604,10 +616,12 @@ typedef union {
         String_View functionName;
         size_t functionArgs;
         size_t functionBody;
+        String_View functionRetType;
     };
     // Represents a linked list of function arguments.
     struct {                 // NODE_ARGS
-        String_View argArg;
+        String_View argName;
+        String_View argType;
         size_t argNext;
     };
     size_t scopeStatements;  // NODE_SCOPE
@@ -695,6 +709,14 @@ inline size_t addIdentNode(AST_Node_List* list, String_View name) {
     AST_Node node;
     node.type = NODE_IDENT;
     node.data.identName = name;
+    return addNode(list, node);
+}
+
+inline size_t addArgNode(AST_Node_List* list, String_View name, String_View type) {
+    AST_Node node;
+    node.type = NODE_ARGS;
+    node.data.argName = name;
+    node.data.argType = type;
     return addNode(list, node);
 }
 
@@ -980,11 +1002,23 @@ size_t parseArgs(AST_Node_List* list, Lexer* lexer, bool* success) {
         recoverByEatUntil(lexer, TOKEN_IDENT);
         *success = false;
     }
+    String_View name = token.text;
 
-    AST_Node node;
-    node.type = NODE_ARGS;
-    node.data.argArg = token.text;
-    size_t head = addNode(list, node);
+    token = getToken(lexer);
+    if (token.type != TOKEN_COLON) {
+        printErrorMessage(lexer->fileName, scopeToken(token), "Expected \":\" in argument list, got \""SV_FMT"\"", SV_ARG(token.text));
+        recoverByEatUntil(lexer, TOKEN_COLON);
+        *success = false;
+    }
+
+    token = getToken(lexer);
+    if (token.type != TOKEN_INTTYPE_KEYWORD) {
+        printErrorMessage(lexer->fileName, scopeToken(token), "Expected a type name in argument list, got \""SV_FMT"\"", SV_ARG(token.text));
+        recoverByEatUntil(lexer, TOKEN_INTTYPE_KEYWORD);
+        *success = false;
+    }
+    String_View type = token.text;
+    size_t head = addArgNode(list, name, type);
     size_t curr = head;
 
     token = getToken(lexer);
@@ -1001,9 +1035,24 @@ size_t parseArgs(AST_Node_List* list, Lexer* lexer, bool* success) {
             recoverByEatUntil(lexer, TOKEN_IDENT);
             *success = false;
         }
+        name = token.text;
+
+        token = getToken(lexer);
+        if (token.type != TOKEN_COLON) {
+            printErrorMessage(lexer->fileName, scopeToken(token), "Expected \":\" in argument list, got \""SV_FMT"\"", SV_ARG(token.text));
+            recoverByEatUntil(lexer, TOKEN_COLON);
+            *success = false;
+        }
+
+        token = getToken(lexer);
+        if (token.type != TOKEN_INTTYPE_KEYWORD) {
+            printErrorMessage(lexer->fileName, scopeToken(token), "Expected a type name in argument list, got \""SV_FMT"\"", SV_ARG(token.text));
+            recoverByEatUntil(lexer, TOKEN_INTTYPE_KEYWORD);
+            *success = false;
+        }
+        type = token.text;
         
-        node.data.argArg = token.text;
-        list->nodes[curr].data.argNext = addNode(list, node);
+        list->nodes[curr].data.argNext = addArgNode(list, name, type);
         curr = list->nodes[curr].data.argNext;
 
         token = getToken(lexer);
@@ -1053,6 +1102,20 @@ size_t parseFunction(AST_Node_List* list, Lexer* lexer) {
     }
 
     token = getToken(lexer);
+    if (token.type == TOKEN_ARROW) {
+        token = getToken(lexer);
+        if (token.type != TOKEN_INTTYPE_KEYWORD) {
+            printErrorMessage(lexer->fileName, scopeToken(token), "Expected a return type in function definition, got \""SV_FMT"\"", SV_ARG(token.text));
+            recoverByEatUpTo(lexer, TOKEN_LBRACE);
+            success = false;
+        }
+        node.data.functionRetType = token.text;
+        token = getToken(lexer);
+    }
+    else {
+        node.data.functionRetType = svFromCStr("unit");
+    }
+
     if (token.type != TOKEN_LBRACE) {
         printErrorMessage(lexer->fileName, scopeToken(token), "Expected function body (starting with \"{\") in function definition, got \""SV_FMT"\"", SV_ARG(token.text));
         recoverByEatUntil(lexer, TOKEN_LBRACE);
@@ -1081,7 +1144,7 @@ void printASTIndented(int indent, AST_Node_List list, size_t root) {
     AST_Node node = list.nodes[root];
     switch (node.type) {
         case NODE_FUNCTION: {
-            printIndented(indent, "type=FUNCTION, name="SV_FMT", args=", SV_ARG(node.data.functionName));
+            printIndented(indent, "type=FUNCTION, name="SV_FMT", rettype="SV_FMT", args=", SV_ARG(node.data.functionName), SV_ARG(node.data.functionRetType));
             if (node.data.functionArgs == SIZE_MAX) {
                 printf("NONE, body=");
             }
@@ -1101,10 +1164,10 @@ void printASTIndented(int indent, AST_Node_List list, size_t root) {
             break;
         }
         case NODE_ARGS: {
-            printIndented(indent, SV_FMT",\n", SV_ARG(node.data.argArg));
+            printIndented(indent, "name="SV_FMT", type="SV_FMT"\n", SV_ARG(node.data.argName), SV_ARG(node.data.argType));
             while (node.data.argNext != SIZE_MAX) {
                 node = list.nodes[node.data.argNext];
-                printIndented(indent, SV_FMT",\n", SV_ARG(node.data.argArg));
+                printIndented(indent, "name="SV_FMT", type="SV_FMT"\n", SV_ARG(node.data.argName), SV_ARG(node.data.argType));
             }
             break;
         }
