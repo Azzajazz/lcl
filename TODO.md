@@ -1,7 +1,7 @@
 # TODO List
 
 ## Bug fixes
-- Improvements on error messages
+- Improvements on error messages (on hold until the language is useable)
 
 ## Feature adds
 - Control flow structures (branches + loops)
