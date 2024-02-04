@@ -4,7 +4,6 @@
 - Improvements on error messages (on hold until the language is useable)
 
 ## Feature adds
-- Control flow structures (branches + loops)
 - Check for use-before-declared, etc (sanitizer)
 - Type checking
 - Multiple function definitions

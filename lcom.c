@@ -241,6 +241,9 @@ typedef enum {
     // Keyword tokens
     TOKEN_FUNC_KEYWORD,
     TOKEN_RETURN_KEYWORD,
+    TOKEN_IF_KEYWORD,
+    TOKEN_ELSE_KEYWORD,
+    TOKEN_WHILE_KEYWORD,
     TOKEN_INTTYPE_KEYWORD,
 
     // Identifiers
@@ -386,12 +389,34 @@ Token getIntToken(Lexer* lexer) {
 
 Token getKeywordToken(Lexer* lexer) {
     switch (*lexer->code) {
+        case 'e': {
+            if (strncmp(lexer->code, "else", 4) == 0 && isLexemeTerminator(lexer->code[4])) {
+                Token token = makeToken(lexer, TOKEN_ELSE_KEYWORD, 4);
+                lexerAdvance(lexer, 4);
+                return token;
+            }
+            break;
+        }
         case 'f': {
             if (strncmp(lexer->code, "func", 4) == 0 && isLexemeTerminator(lexer->code[4])) {
                 Token token = makeToken(lexer, TOKEN_FUNC_KEYWORD, 4);
                 lexerAdvance(lexer, 4);
                 return token;
             }
+            break;
+        }
+        case 'i': {
+            if (strncmp(lexer->code, "int", 3) == 0 && isLexemeTerminator(lexer->code[3])) {
+                Token token = makeToken(lexer, TOKEN_INTTYPE_KEYWORD, 3);
+                lexerAdvance(lexer, 3);
+                return token;
+            }
+            else if (strncmp(lexer->code, "if", 2) == 0 && isLexemeTerminator(lexer->code[2])) {
+                Token token = makeToken(lexer, TOKEN_IF_KEYWORD, 2);
+                lexerAdvance(lexer, 2);
+                return token;
+            }
+            break;
         }
         case 'r': {
             if (strncmp(lexer->code, "return", 6) == 0 && isLexemeTerminator(lexer->code[6])) {
@@ -399,11 +424,12 @@ Token getKeywordToken(Lexer* lexer) {
                 lexerAdvance(lexer, 6);
                 return token;
             }
+            break;
         }
-        case 'i': {
-            if (strncmp(lexer->code, "int", 3) == 0 && isLexemeTerminator(lexer->code[3])) {
-                Token token = makeToken(lexer, TOKEN_INTTYPE_KEYWORD, 3);
-                lexerAdvance(lexer, 3);
+        case 'w': {
+            if (strncmp(lexer->code, "while", 5) == 0 && isLexemeTerminator(lexer->code[5])) {
+                Token token = makeToken(lexer, TOKEN_WHILE_KEYWORD, 5);
+                lexerAdvance(lexer, 5);
                 return token;
             }
         }
@@ -607,6 +633,11 @@ typedef enum {
     // Literals
     NODE_INT,
 
+    // Control flow
+    NODE_IF,
+    NODE_ELSE,
+    NODE_WHILE,
+
     // Identifiers
     NODE_IDENT
 } Node_Type;
@@ -633,6 +664,13 @@ typedef union {
     struct {                 // Binary operations (e.g. NODE_PLUS, NODE_MINUS, ...)
         size_t binaryOpLeft;
         size_t binaryOpRight;
+    };
+    struct {                 // Control statements (NODE_IF, NODE_WHILE)
+        size_t controlCondition;
+        size_t controlScope;
+    };
+    struct {                 // NODE_ELSE
+        size_t elseScope;
     };
     size_t returnExpr;       // NODE_RETURN
     struct {                 // NODE_DELCARATION
@@ -720,17 +758,25 @@ inline size_t addArgNode(AST_Node_List* list, String_View name, String_View type
     return addNode(list, node);
 }
 
-inline size_t addUnaryNode(AST_Node_List* list, Node_Type type, size_t child) {
+inline size_t addReturnNode(AST_Node_List* list, size_t expr) {
+    AST_Node node;
+    node.type = NODE_RETURN;
+    node.data.returnExpr = expr;
+    return addNode(list, node);
+}
+
+inline size_t addElseNode(AST_Node_List* list, size_t scope) {
+    AST_Node node;
+    node.type = NODE_ELSE;
+    node.data.elseScope = scope;
+    return addNode(list, node);
+}
+
+inline size_t addIfOrWhileNode(AST_Node_List* list, Node_Type type, size_t condition, size_t scope) {
     AST_Node node;
     node.type = type;
-    switch (node.type) {
-        case NODE_RETURN:
-            node.data.returnExpr = child;
-            break;
-        default:
-            printf("Unknown unary node: %d\n", node.type);
-            assert(false && "Called with a node type that is not unary, or non-exhaustive cases (addUnaryNode)");
-    }
+    node.data.controlCondition = condition;
+    node.data.controlScope = scope;
     return addNode(list, node);
 }
 
@@ -901,7 +947,7 @@ size_t parseStatement(AST_Node_List* list, Lexer* lexer) {
                recoverByEatUntil(lexer, TOKEN_SEMICOLON);
                return SIZE_MAX;
             }
-            size_t result = addUnaryNode(list, NODE_RETURN, inner);
+            size_t result = addReturnNode(list, inner);
             token = getToken(lexer);
             if (token.type != TOKEN_SEMICOLON) {
                 printErrorMessage(lexer->fileName, scopeAfter(token), "Expected a \";\", but got none");
@@ -941,7 +987,46 @@ size_t parseStatement(AST_Node_List* list, Lexer* lexer) {
                     }
                     return addAssignmentNode(list, name, expr);
                 }
+                default: {
+                    printErrorMessage(lexer->fileName, scopeToken(token), "Expected a declaration or an assignment, but got neither");
+                    recoverByEatUntil(lexer, TOKEN_SEMICOLON);
+                    break;
+                }
             }
+            break;
+        }
+        case TOKEN_IF_KEYWORD: {
+            //TODO: Error recovery from parseExpr will eat until a semicolon, but that's not great here.
+            size_t condition = parseExpr(list, lexer, -1);
+            if (condition == SIZE_MAX) {
+                recoverByEatUntil(lexer, TOKEN_RBRACE);
+                return SIZE_MAX;
+            }
+            size_t scope = parseScope(list, lexer);
+            if (scope == SIZE_MAX) {
+                return SIZE_MAX;
+            }
+            return addIfOrWhileNode(list, NODE_IF, condition, scope);
+        }
+        case TOKEN_ELSE_KEYWORD: {
+            size_t scope = parseScope(list, lexer);
+            if (scope == SIZE_MAX) {
+                return SIZE_MAX;
+            }
+            return addElseNode(list, scope);
+        }
+        case TOKEN_WHILE_KEYWORD: {
+            size_t condition = parseExpr(list, lexer, -1);
+            if (condition == SIZE_MAX) {
+                recoverByEatUntil(lexer, TOKEN_RBRACE);
+                return SIZE_MAX;
+            }
+            size_t scope = parseScope(list, lexer);
+            if (scope == SIZE_MAX) {
+                return SIZE_MAX;
+            }
+            return addIfOrWhileNode(list, NODE_WHILE, condition, scope);
+            break;
         }
         default: {
             printErrorMessage(lexer->fileName, scopeToken(token), "Expected the start of a valid statement, got \""SV_FMT"\"", SV_ARG(token.text));
@@ -976,11 +1061,15 @@ size_t parseStatements(AST_Node_List* list, Lexer* lexer, bool* success) {
         list->nodes[curr].data.statementNext = addNode(list, node);
         curr = list->nodes[curr].data.statementNext;
     }
+    getToken(lexer); // Eat the '}'
     list->nodes[curr].data.statementNext = SIZE_MAX;
     return head;
 }
 
 size_t parseScope(AST_Node_List* list, Lexer* lexer) {
+    Token token = getToken(lexer);
+    assert(token.type == TOKEN_LBRACE);
+
     AST_Node node;
     node.type = NODE_SCOPE;
 
@@ -994,6 +1083,9 @@ size_t parseArgs(AST_Node_List* list, Lexer* lexer, bool* success) {
     *success = true;
 
     Token token = getToken(lexer);
+    assert(token.type == TOKEN_LPAREN);
+
+    token = getToken(lexer);
     if (token.type == TOKEN_RPAREN) {
         return SIZE_MAX;
     }
@@ -1088,7 +1180,7 @@ size_t parseFunction(AST_Node_List* list, Lexer* lexer) {
         success = false;
     }
 
-    token = getToken(lexer);
+    token = peekToken(lexer);
     if (token.type != TOKEN_LPAREN) {
         printErrorMessage(lexer->fileName, scopeToken(token), "Expected argument list (starting with \"(\") in function definition, got \""SV_FMT"\"", SV_ARG(token.text));
         recoverByEatUntil(lexer, TOKEN_LPAREN);
@@ -1101,8 +1193,9 @@ size_t parseFunction(AST_Node_List* list, Lexer* lexer) {
         success = false;
     }
 
-    token = getToken(lexer);
+    token = peekToken(lexer);
     if (token.type == TOKEN_ARROW) {
+        getToken(lexer); // Eat the "->"
         token = getToken(lexer);
         if (token.type != TOKEN_INTTYPE_KEYWORD) {
             printErrorMessage(lexer->fileName, scopeToken(token), "Expected a return type in function definition, got \""SV_FMT"\"", SV_ARG(token.text));
@@ -1110,7 +1203,7 @@ size_t parseFunction(AST_Node_List* list, Lexer* lexer) {
             success = false;
         }
         node.data.functionRetType = token.text;
-        token = getToken(lexer);
+        token = peekToken(lexer);
     }
     else {
         node.data.functionRetType = svFromCStr("unit");
@@ -1245,6 +1338,28 @@ void printASTIndented(int indent, AST_Node_List list, size_t root) {
             printIndented(indent, ")\n");
             break;
         }
+        case NODE_IF: {
+            printIndented(indent, "type=IF, condition=(\n");
+            printASTIndented(indent + 1, list, node.data.controlCondition);
+            printIndented(indent, "), body=(\n");
+            printASTIndented(indent + 1, list, node.data.controlScope);
+            printIndented(indent, ")\n");
+            break;
+        }
+        case NODE_ELSE: {
+            printIndented(indent, "type=ELSE, body=(\n");
+            printASTIndented(indent + 1, list, node.data.elseScope);
+            printIndented(indent, ")\n");
+            break;
+        }
+        case NODE_WHILE: {
+            printIndented(indent, "type=WHILE, condition=(\n");
+            printASTIndented(indent + 1, list, node.data.controlCondition);
+            printIndented(indent, "), body=(\n");
+            printASTIndented(indent + 1, list, node.data.controlScope);
+            printIndented(indent, ")\n");
+            break;
+        }
         case NODE_INT: {
             printIndented(indent, "type=INT, value=%d\n", node.data.intValue);
             break;
@@ -1273,7 +1388,7 @@ void emitTerm(FILE* file, AST_Node_List list, size_t root);
 void emitExpr(FILE* file, AST_Node_List list, size_t root, int precedence);
 void emitStatement(int indent, FILE* file, AST_Node_List list, size_t root);
 void emitStatements(int indent, FILE* file, AST_Node_List list, size_t root);
-void emitScope(int indent, FILE* file, AST_Node_List list, size_t root);
+void emitScope(int leadingIndent, int indent, FILE* file, AST_Node_List list, size_t root);
 void emitArgs(FILE* file, AST_Node_List list, size_t root);
 void emitFunction(FILE* file, AST_Node_List list, size_t root);
 
@@ -1344,22 +1459,43 @@ void emitStatement(int indent, FILE* file, AST_Node_List list, size_t root) {
         case NODE_RETURN: {
             tryFPutsIndented(indent, "return ", file);
             emitExpr(file, list, statement.data.returnExpr, -1);
+            tryFPuts(";\n", file);
             break;
         }
         case NODE_DECLARATION: {
             tryFPrintfIndented(indent, file, SV_FMT" "SV_FMT, SV_ARG(statement.data.declarationType), SV_ARG(statement.data.declarationName));
+            tryFPuts(";\n", file);
             break;
         }
         case NODE_ASSIGNMENT: {
             tryFPrintfIndented(indent, file, SV_FMT" = ", SV_ARG(statement.data.assignmentName));
             emitExpr(file, list, statement.data.assignmentExpr, -1);
+            tryFPuts(";\n", file);
+            break;
+        }
+        case NODE_IF: {
+            tryFPutsIndented(indent, "if (", file);
+            emitExpr(file, list, statement.data.controlCondition, -1);
+            tryFPuts(") ", file);
+            emitScope(0, indent, file, list, statement.data.controlScope);
+            break;
+        }
+        case NODE_ELSE: {
+            tryFPutsIndented(indent, "else ", file);
+            emitScope(0, indent, file, list, statement.data.elseScope);
+            break;
+        }
+        case NODE_WHILE: {
+            tryFPutsIndented(indent, "while (", file);
+            emitExpr(file, list, statement.data.controlCondition, -1);
+            tryFPuts(") ", file);
+            emitScope(0, indent, file, list, statement.data.controlScope);
             break;
         }
         default:
             printf("Unexpected node type: %d\n", statement.type);
             assert(false && "Not a statement type or non-exhaustive cases (emitStatement)");
     }
-    tryFPuts(";\n", file);
 }
 
 void emitStatements(int indent, FILE* file, AST_Node_List list, size_t root) {
@@ -1376,11 +1512,11 @@ void emitStatements(int indent, FILE* file, AST_Node_List list, size_t root) {
     } while (root != SIZE_MAX);
 }
 
-void emitScope(int indent, FILE* file, AST_Node_List list, size_t root) {
+void emitScope(int leadingIndent, int indent, FILE* file, AST_Node_List list, size_t root) {
     AST_Node scope = list.nodes[root];
     assert(scope.type == NODE_SCOPE);
 
-    tryFPutsIndented(indent, "{\n", file);
+    tryFPutsIndented(leadingIndent, "{\n", file);
     emitStatements(indent + 1, file, list, scope.data.scopeStatements);
     tryFPutsIndented(indent, "}\n", file);
 }
@@ -1418,7 +1554,8 @@ void emitFunction(FILE* file, AST_Node_List list, size_t root) {
     }
     tryFPrintf(file, SV_FMT, SV_ARG(function.data.functionName));
     emitArgs(file, list, function.data.functionArgs);
-    emitScope(0, file, list, function.data.functionBody);
+    tryFPuts(" ", file);
+    emitScope(0, 0, file, list, function.data.functionBody);
 }
 
 // Read in file simple.lcl - DONE
