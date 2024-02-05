@@ -137,6 +137,13 @@ String_View svFromCStr(char* cstr) {
     return (String_View){cstr, (int)strlen(cstr)};
 }
 
+bool svEquals(String_View sv1, String_View sv2) {
+    if (sv1.length != sv2.length) {
+        return false;
+    }
+    return strncmp(sv1.start, sv2.start, sv1.length) == 0;
+}
+
 bool svEqualsCStr(String_View sv, char* cstr) {
     for (size_t i = 0; i < sv.length; ++i) {
         if (cstr[i] == '\0' || cstr[i] != sv.start[i]) {
@@ -1380,6 +1387,164 @@ inline void printAST(AST_Node_List list, size_t root) {
 
 
 
+///////////////////
+// Sanitizer API //
+///////////////////
+
+typedef struct {
+    String_View* names;
+    int length;
+    int capacity;
+} Vars;
+
+inline Vars makeVars(int capacity) {
+    return (Vars){
+        .names = malloc(sizeof(String_View) * capacity),
+        .length = 0,
+        .capacity = capacity,
+    };
+}
+
+inline Vars copyVars(Vars vars) {
+    Vars result = {
+        .names = malloc(sizeof(String_View) * vars.capacity),
+        .length = vars.length,
+        .capacity = vars.capacity,
+    };
+    memcpy(result.names, vars.names, sizeof(String_View) * vars.length);
+    return result;
+}
+
+inline void destroyVars(Vars vars) {
+    free(vars.names);
+}
+
+void varsAdd(Vars* vars, String_View name) {
+    if (vars->length == vars->capacity) {
+        vars->capacity *= 2;
+        vars->names = realloc(vars->names, sizeof(String_View) * vars->capacity);
+    }
+    vars->names[vars->length++] = name;
+}
+
+bool varsHas(Vars vars, String_View name) {
+    for (int i = 0; i < vars.length; ++i) {
+        if (svEquals(vars.names[i], name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool verifyExpr(AST_Node_List list, size_t root, Vars defined);
+bool verifyScope(AST_Node_List list, size_t root, Vars preDefined);
+bool verifyFunction(AST_Node_List list, size_t root);
+
+bool verifyExpr(AST_Node_List list, size_t root, Vars defined) {
+    AST_Node expr = list.nodes[root];
+    bool success = true;
+    switch (expr.type) {
+        case NODE_IDENT: {
+            if (!varsHas(defined, expr.data.identName)) {
+                printf("ERROR! "SV_FMT" used before it was declared.\n", SV_ARG(expr.data.identName));
+                success = false;
+            }
+            break;
+        }
+        case NODE_PLUS:
+        case NODE_MINUS:
+        case NODE_TIMES:
+        case NODE_DIVIDE: {
+            if (!verifyExpr(list, expr.data.binaryOpLeft, defined) || !verifyExpr(list, expr.data.binaryOpRight, defined)) {
+                success = false;
+            }
+            break;
+        }
+    }
+    return success;
+}
+
+bool verifyScope(AST_Node_List list, size_t root, Vars preDefined) {
+    AST_Node scope = list.nodes[root];
+    assert(scope.type == NODE_SCOPE);
+    if (scope.data.scopeStatements == SIZE_MAX) {
+        return true;
+    }
+
+    Vars defined = copyVars(preDefined);
+
+    bool success = true;
+    size_t statementsI = scope.data.scopeStatements;
+    while (statementsI != SIZE_MAX) {
+        AST_Node statements = list.nodes[statementsI];
+        AST_Node statement = list.nodes[statements.data.statementStatement];
+        switch (statement.type) {
+            case NODE_ASSIGNMENT: {
+                if (!varsHas(defined, statement.data.assignmentName)) {
+                    printf("ERROR! "SV_FMT" used before it was declared.\n", SV_ARG(statement.data.assignmentName));
+                    success = false;
+                }
+                if (!verifyExpr(list, statement.data.assignmentExpr, defined)) {
+                    success = false;
+                }
+                break;
+            }
+            case NODE_DECLARATION: {
+                if (varsHas(defined, statement.data.declarationName)) {
+                    printf("ERROR! "SV_FMT" has been declared in this scope or an earlier scope.\n", SV_ARG(statement.data.declarationName));
+                    success = false;
+                }
+                else {
+                    varsAdd(&defined, statement.data.declarationName);
+                }
+                break;
+            }
+            case NODE_IF:
+            case NODE_WHILE: {
+                if (!verifyScope(list, statement.data.controlScope, defined)) {
+                    success = false;
+                }
+                break;
+            }
+            case NODE_ELSE: {
+                if (!verifyScope(list, statement.data.elseScope, defined)) {
+                    success = false;
+                }
+                break;
+            }
+            case NODE_RETURN: {
+                if (!verifyExpr(list, statement.data.returnExpr, defined)) {
+                    success = false;
+                }
+                break;
+            }
+        }
+        statementsI = statements.data.statementNext;
+    }
+    
+    destroyVars(defined);
+    return success;
+}
+
+bool verifyFunction(AST_Node_List list, size_t root) {
+    AST_Node function = list.nodes[root];
+    assert(function.type == NODE_FUNCTION);
+
+    Vars args = makeVars(5);
+    size_t argsI = function.data.functionArgs;
+    while (argsI != SIZE_MAX) {
+        AST_Node arg = list.nodes[argsI];
+        varsAdd(&args, arg.data.argName);
+        argsI = arg.data.argNext;
+    }
+    bool success = verifyScope(list, function.data.functionBody, args);
+
+    destroyVars(args);
+    return success;
+}
+
+
+
 /////////////////
 // Emitter API //
 /////////////////
@@ -1575,6 +1740,10 @@ int main() {
         return 1;
     }
     printAST(list, function);
+    bool verified = verifyFunction(list, function);
+    if (!verified) {
+        return 1;
+    }
     FILE* output = tryFOpen("examples/simple.c", "wb");
     emitFunction(output, list, function);
     return 0;
