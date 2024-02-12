@@ -1,10 +1,4 @@
 main :: func(a: int, b: int) {
-    c: int;
     c = 5;
-    if 1 {
-        return a * (5 + 3) - c;
-    }
-    else {
-        return 0;
-    }
+    return alpha + 5;
 }

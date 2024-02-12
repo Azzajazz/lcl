@@ -1392,158 +1392,152 @@ inline void printAST(AST_Node_List list, size_t root) {
 ///////////////////
 
 typedef struct {
-    String_View* names;
+    String_View name;
+    String_View type;
+} Symbol_Info;
+
+typedef struct {
+    Symbol_Info* symbols;
     int length;
     int capacity;
-} Vars;
+} Symbol_Table;
 
-inline Vars makeVars(int capacity) {
-    return (Vars){
-        .names = malloc(sizeof(String_View) * capacity),
+inline Symbol_Table makeSymbolTable(int capacity) {
+    return (Symbol_Table){
+        .symbols = malloc(capacity * sizeof(Symbol_Info)),
         .length = 0,
         .capacity = capacity,
     };
 }
 
-inline Vars copyVars(Vars vars) {
-    Vars result = {
-        .names = malloc(sizeof(String_View) * vars.capacity),
-        .length = vars.length,
-        .capacity = vars.capacity,
-    };
-    memcpy(result.names, vars.names, sizeof(String_View) * vars.length);
-    return result;
-}
-
-inline void destroyVars(Vars vars) {
-    free(vars.names);
-}
-
-void varsAdd(Vars* vars, String_View name) {
-    if (vars->length == vars->capacity) {
-        vars->capacity *= 2;
-        vars->names = realloc(vars->names, sizeof(String_View) * vars->capacity);
+inline void tablePushSymbol(Symbol_Table* table, String_View name, String_View type) {
+    if (table->length == table->capacity) {
+        table->capacity *= 2;
+        table->symbols = realloc(table->symbols, table->capacity * sizeof(Symbol_Info));
     }
-    vars->names[vars->length++] = name;
+    table->symbols[table->length++] = (Symbol_Info){name, type};
 }
 
-bool varsHas(Vars vars, String_View name) {
-    for (int i = 0; i < vars.length; ++i) {
-        if (svEquals(vars.names[i], name)) {
-            return true;
+inline void tableRemoveSymbols(Symbol_Table* table, int number) {
+    assert(table->length >= number);
+    table->length -= number;
+}
+
+inline int tableFindSymbol(Symbol_Table* table, String_View name) {
+    for (int i = table->length - 1; i >= 0; --i) {
+        if (svEquals(table->symbols[i].name, name)) {
+            return i;
         }
     }
-    return false;
+    return -1;
 }
 
-bool verifyExpr(AST_Node_List list, size_t root, Vars defined);
-bool verifyScope(AST_Node_List list, size_t root, Vars preDefined);
-bool verifyFunction(AST_Node_List list, size_t root);
+bool typeCheckAndVerifyFunction(AST_Node_List list, size_t root, Symbol_Table* table);
+bool typeCheckAndVerifyScope(AST_Node_List list, size_t root, Symbol_Table* table, String_View expectedType);
+bool typeCheckAndVerifyStatement(AST_Node_List list, size_t root, Symbol_Table* table, String_View expectedType);
+bool typeCheckAndVerifyExpr(AST_Node_List list, size_t root, Symbol_Table* table, String_View expectedType);
 
-bool verifyExpr(AST_Node_List list, size_t root, Vars defined) {
-    AST_Node expr = list.nodes[root];
+bool typeCheckAndVerifyFunction(AST_Node_List list, size_t root, Symbol_Table* table) {
+    AST_Node function = list.nodes[root];
+    assert(function.type == NODE_FUNCTION);
+
+    size_t args = function.data.functionArgs;
+    while (args != SIZE_MAX) {
+        AST_Node arg = list.nodes[args];
+        tablePushSymbol(table, arg.data.argName, arg.data.argType);
+        args = arg.data.argNext;
+    }
+
+    return typeCheckAndVerifyScope(list, function.data.functionBody, table, function.data.functionRetType);
+}
+
+bool typeCheckAndVerifyScope(AST_Node_List list, size_t root, Symbol_Table* table, String_View expectedType) {
+    AST_Node scope = list.nodes[root];
+    assert(scope.type == NODE_SCOPE);
     bool success = true;
-    switch (expr.type) {
-        case NODE_IDENT: {
-            if (!varsHas(defined, expr.data.identName)) {
-                printf("ERROR! "SV_FMT" used before it was declared.\n", SV_ARG(expr.data.identName));
-                success = false;
+
+    size_t statements = scope.data.scopeStatements;
+    while (statements != SIZE_MAX) {
+        AST_Node statement = list.nodes[statements];
+        bool statementSuccess = typeCheckAndVerifyStatement(list, statement.data.statementStatement, table, expectedType);
+        if (!statementSuccess) {
+            success = false;
+        }
+        statements = statement.data.statementNext;
+    }
+
+    return success;
+}
+
+bool typeCheckAndVerifyStatement(AST_Node_List list, size_t root, Symbol_Table* table, String_View expectedType) {
+    AST_Node statement = list.nodes[root];
+    switch (statement.type) {
+        case NODE_RETURN: {
+            return typeCheckAndVerifyExpr(list, statement.data.returnExpr, table, expectedType);
+        }
+        case NODE_DECLARATION: {
+            tablePushSymbol(table, statement.data.declarationName, statement.data.declarationType);
+            return true;
+        }
+        case NODE_ASSIGNMENT: {
+            int index = tableFindSymbol(table, statement.data.assignmentName);
+            if (index < 0) {
+                fprintf(stderr, "ERROR! Variable \""SV_FMT"\" used before it was declared\n", SV_ARG(statement.data.assignmentName));
+                return false;
             }
-            break;
+            
+            return typeCheckAndVerifyExpr(list, statement.data.assignmentExpr, table, table->symbols[index].type);
+        }
+        case NODE_WHILE:
+        case NODE_IF: {
+            if (!typeCheckAndVerifyExpr(list, statement.data.controlCondition, table, svFromCStr("bool"))) {
+                return false;
+            }
+            return typeCheckAndVerifyScope(list, statement.data.controlScope, table, svFromCStr("unit"));
+        }
+        case NODE_ELSE: {
+            return typeCheckAndVerifyScope(list, statement.data.elseScope, table, svFromCStr("unit"));
+        }
+        default: {
+            printf("Unknown statement type: %d\n", statement.type);
+            assert(false && "This is not a statement or non-exhaustive cases (typeCheckAndVerifyStatement)");
+        }
+    }
+}
+
+bool typeCheckAndVerifyExpr(AST_Node_List list, size_t root, Symbol_Table* table, String_View expectedType) {
+    AST_Node expr = list.nodes[root];
+    switch (expr.type) {
+        case NODE_INT: {
+            if (!svEqualsCStr(expectedType, "int")) {
+                fprintf(stderr, "ERROR! Type mismatch. Expected "SV_FMT", got int\n", SV_ARG(expectedType));
+                return false;
+            }
+            return true;
+        }
+        case NODE_IDENT: {
+            int index = tableFindSymbol(table, expr.data.identName);
+            if (index < 0) {
+                fprintf(stderr, "ERROR! Variable \""SV_FMT"\" used before it was declared\n", SV_ARG(expr.data.assignmentName));
+                return false;
+            }
+            return svEquals(expectedType, table->symbols[index].type);
         }
         case NODE_PLUS:
         case NODE_MINUS:
         case NODE_TIMES:
         case NODE_DIVIDE: {
-            if (!verifyExpr(list, expr.data.binaryOpLeft, defined) || !verifyExpr(list, expr.data.binaryOpRight, defined)) {
-                success = false;
+            bool leftSuccess = typeCheckAndVerifyExpr(list, expr.data.binaryOpLeft, table, expectedType);
+            if (!leftSuccess) {
+                return false;
             }
-            break;
+            return typeCheckAndVerifyExpr(list, expr.data.binaryOpRight, table, expectedType);
         }
+        default:
+            printf("Unknown expression node: %d\n", expr.type);
+            assert(false && "Not an expression or non-exhaustive cases (typeCheckAndVerifyExpr)");
     }
-    return success;
 }
-
-bool verifyScope(AST_Node_List list, size_t root, Vars preDefined) {
-    AST_Node scope = list.nodes[root];
-    assert(scope.type == NODE_SCOPE);
-    if (scope.data.scopeStatements == SIZE_MAX) {
-        return true;
-    }
-
-    Vars defined = copyVars(preDefined);
-
-    bool success = true;
-    size_t statementsI = scope.data.scopeStatements;
-    while (statementsI != SIZE_MAX) {
-        AST_Node statements = list.nodes[statementsI];
-        AST_Node statement = list.nodes[statements.data.statementStatement];
-        switch (statement.type) {
-            case NODE_ASSIGNMENT: {
-                if (!varsHas(defined, statement.data.assignmentName)) {
-                    printf("ERROR! "SV_FMT" used before it was declared.\n", SV_ARG(statement.data.assignmentName));
-                    success = false;
-                }
-                if (!verifyExpr(list, statement.data.assignmentExpr, defined)) {
-                    success = false;
-                }
-                break;
-            }
-            case NODE_DECLARATION: {
-                if (varsHas(defined, statement.data.declarationName)) {
-                    printf("ERROR! "SV_FMT" has been declared in this scope or an earlier scope.\n", SV_ARG(statement.data.declarationName));
-                    success = false;
-                }
-                else {
-                    varsAdd(&defined, statement.data.declarationName);
-                }
-                break;
-            }
-            case NODE_IF:
-            case NODE_WHILE: {
-                if (!verifyScope(list, statement.data.controlScope, defined)) {
-                    success = false;
-                }
-                break;
-            }
-            case NODE_ELSE: {
-                if (!verifyScope(list, statement.data.elseScope, defined)) {
-                    success = false;
-                }
-                break;
-            }
-            case NODE_RETURN: {
-                if (!verifyExpr(list, statement.data.returnExpr, defined)) {
-                    success = false;
-                }
-                break;
-            }
-        }
-        statementsI = statements.data.statementNext;
-    }
-    
-    destroyVars(defined);
-    return success;
-}
-
-bool verifyFunction(AST_Node_List list, size_t root) {
-    AST_Node function = list.nodes[root];
-    assert(function.type == NODE_FUNCTION);
-
-    Vars args = makeVars(5);
-    size_t argsI = function.data.functionArgs;
-    while (argsI != SIZE_MAX) {
-        AST_Node arg = list.nodes[argsI];
-        varsAdd(&args, arg.data.argName);
-        argsI = arg.data.argNext;
-    }
-    bool success = verifyScope(list, function.data.functionBody, args);
-
-    destroyVars(args);
-    return success;
-}
-
-
 
 /////////////////
 // Emitter API //
@@ -1740,8 +1734,9 @@ int main() {
         return 1;
     }
     printAST(list, function);
-    bool verified = verifyFunction(list, function);
-    if (!verified) {
+    Symbol_Table table = makeSymbolTable(8);
+    bool valid = typeCheckAndVerifyFunction(list, function, &table);
+    if (!valid) {
         return 1;
     }
     FILE* output = tryFOpen("examples/simple.c", "wb");
