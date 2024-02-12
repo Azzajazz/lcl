@@ -1,10 +1,6 @@
-int main(int a, int b) {
-    int c;
-    c = 5;
-    if (1) {
-        return a * (5 + 3) - c;
-    }
-    else {
-        return 0;
+int main() {
+    int a;
+    a = 1;
+    if (a == 1) {
     }
 }

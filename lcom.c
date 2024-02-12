@@ -8,7 +8,10 @@
 #include <stdarg.h>
 #include <assert.h>
 
-
+////////////////////////////////////////////////////////////////////////////////////////////////////
+// IMPORTANT:
+// 1: NODE_IS_EQUAL is not type checked. Could require a rewrite of the typeCheckAndVerifyX API
+////////////////////////////////////////////////////////////////////////////////////////////////////
 
 //////////////
 // File API //
@@ -225,6 +228,9 @@ void printErrorMessage(char* fileName, Lex_Scope scope, char* fmt, ...) {
 // Lexer API //
 ///////////////
 
+#define NUM_BINOP_TOKENS 5
+#define NUM_TYPE_TOKENS 2
+
 typedef enum {
     // Special token for EOF. Returned when the lexer has no more tokens.
     TOKEN_EOF,
@@ -236,31 +242,39 @@ typedef enum {
     TOKEN_LBRACE,
     TOKEN_RBRACE,
     TOKEN_COLON,
-    TOKEN_DCOLON,
+    TOKEN_DOUBLE_COLON,
     TOKEN_SEMICOLON,
     TOKEN_PLUS,
     TOKEN_MINUS,
     TOKEN_STAR,
     TOKEN_SLASH,
     TOKEN_EQUALS,
+    TOKEN_DOUBLE_EQUALS,
     TOKEN_ARROW,
 
-    // Keyword tokens
+    // Control flow keywords
     TOKEN_FUNC_KEYWORD,
     TOKEN_RETURN_KEYWORD,
     TOKEN_IF_KEYWORD,
     TOKEN_ELSE_KEYWORD,
     TOKEN_WHILE_KEYWORD,
+
+    // Primitive type keywords
     TOKEN_INTTYPE_KEYWORD,
+    TOKEN_BOOLTYPE_KEYWORD,
 
     // Identifiers
     TOKEN_IDENT,
 
     // Literals
     TOKEN_INT,
+    TOKEN_BOOL,
 
     // Used to communicate that a token tried to be constructed, but was not of the expected type.
     TOKEN_ERROR,
+
+    // Used for static asserts
+    TOKEN_COUNT
 } Token_Type;
 
 typedef struct {
@@ -269,14 +283,25 @@ typedef struct {
     int charNum;
     String_View line;
     String_View text;
-    int intValue;
+    union {
+        int intValue;
+        bool boolValue;
+    };
 } Token;
 
-bool isOperator(Token token) {
-    return token.type == TOKEN_PLUS
-        || token.type == TOKEN_MINUS
-        || token.type == TOKEN_STAR
-        || token.type == TOKEN_SLASH;
+bool isOperator(Token_Type type) {
+    return type == TOKEN_PLUS
+        || type == TOKEN_MINUS
+        || type == TOKEN_STAR
+        || type == TOKEN_SLASH
+        || type == TOKEN_DOUBLE_EQUALS;
+    static_assert(NUM_BINOP_TOKENS == 5, "Non-exhaustive cases (isOperator)");
+}
+
+bool isTypeToken(Token_Type type) {
+    return type == TOKEN_INTTYPE_KEYWORD
+        || type == TOKEN_BOOLTYPE_KEYWORD;
+    static_assert(NUM_TYPE_TOKENS == 2, "Non-exhaustive cases (isTypeToken)");
 }
 
 inline Lex_Scope scopeToken(Token token) {
@@ -394,8 +419,32 @@ Token getIntToken(Lexer* lexer) {
     return result;
 }
 
+Token getBoolToken(Lexer* lexer) {
+    if (strncmp(lexer->code, "true", 4) == 0 && isLexemeTerminator(lexer->code[4])) {
+        Token token = makeToken(lexer, TOKEN_BOOL, 4);
+        token.boolValue = true;
+        lexerAdvance(lexer, 4);
+        return token;
+    }
+    else if (strncmp(lexer->code, "false", 5) == 0 && isLexemeTerminator(lexer->code[5])) {
+        Token token = makeToken(lexer, TOKEN_BOOL, 5);
+        token.boolValue = false;
+        lexerAdvance(lexer, 5);
+        return token;
+    }
+    return (Token){TOKEN_ERROR};
+}
+
 Token getKeywordToken(Lexer* lexer) {
     switch (*lexer->code) {
+        case 'b': {
+            if (strncmp(lexer->code, "bool", 4) == 0 && isLexemeTerminator(lexer->code[4])) {
+                Token token = makeToken(lexer, TOKEN_BOOLTYPE_KEYWORD, 4);
+                lexerAdvance(lexer, 4);
+                return token;
+            }
+            break;
+        }
         case 'e': {
             if (strncmp(lexer->code, "else", 4) == 0 && isLexemeTerminator(lexer->code[4])) {
                 Token token = makeToken(lexer, TOKEN_ELSE_KEYWORD, 4);
@@ -494,7 +543,7 @@ Token getToken(Lexer* lexer) {
                 lexerAdvance(lexer, 1);
             }
             else {
-                result = makeToken(lexer, TOKEN_DCOLON, 2);
+                result = makeToken(lexer, TOKEN_DOUBLE_COLON, 2);
                 lexerAdvance(lexer, 2);
             }
             return result;
@@ -532,12 +581,23 @@ Token getToken(Lexer* lexer) {
             return result;
         }
         case '=': {
-            Token result = makeToken(lexer, TOKEN_EQUALS, 1);
-            lexerAdvance(lexer, 1);
+            Token result;
+            if (lexer->code[1] != '=') {
+                result = makeToken(lexer, TOKEN_EQUALS, 1);
+                lexerAdvance(lexer, 1);
+            }
+            else {
+                result = makeToken(lexer, TOKEN_DOUBLE_EQUALS, 2);
+                lexerAdvance(lexer, 2);
+            }
             return result;
         }
         default: {
             Token result = getIntToken(lexer);
+            if (result.type != TOKEN_ERROR) {
+                return result;
+            }
+            result = getBoolToken(lexer);
             if (result.type != TOKEN_ERROR) {
                 return result;
             }
@@ -558,60 +618,81 @@ inline Token peekToken(Lexer* lexer) {
 }
 
 void printToken(Token token) {
-    char* typeString;
     switch (token.type) {
         case TOKEN_EOF:
-            typeString = "EOF";
+            printf("Type: EOF, text: "SV_FMT"\n", SV_ARG(token.text));
             break;
         case TOKEN_COMMA:
-            typeString = "COMMA";
+            printf("Type: COMMA, text: "SV_FMT"\n", SV_ARG(token.text));
             break;
         case TOKEN_LPAREN:
-            typeString = "LPAREN";
+            printf("Type: LPAREN, text: "SV_FMT"\n", SV_ARG(token.text));
             break;
         case TOKEN_RPAREN:
-            typeString = "RPAREN";
+            printf("Type: RPAREN, text: "SV_FMT"\n", SV_ARG(token.text));
             break;
         case TOKEN_LBRACE:
-            typeString = "LBRACE";
+            printf("Type: LBRACE, text: "SV_FMT"\n", SV_ARG(token.text));
             break;
         case TOKEN_RBRACE:
-            typeString = "RBRACE";
+            printf("Type: RBRACE, text: "SV_FMT"\n", SV_ARG(token.text));
             break;
-        case TOKEN_DCOLON:
-            typeString = "DCOLON";
+        case TOKEN_DOUBLE_COLON:
+            printf("Type: DOUBLE_COLON, text: "SV_FMT"\n", SV_ARG(token.text));
+            break;
+        case TOKEN_EQUALS:
+            printf("Type: EQUALS, text: "SV_FMT"\n", SV_ARG(token.text));
+            break;
+        case TOKEN_DOUBLE_EQUALS:
+            printf("Type: DOUBLE_EQUALS, text: "SV_FMT"\n", SV_ARG(token.text));
             break;
         case TOKEN_SEMICOLON:
-            typeString = "SEMICOLON";
+            printf("Type: SEMICOLON, text: "SV_FMT"\n", SV_ARG(token.text));
             break;
         case TOKEN_PLUS:
-            typeString = "PLUS";
+            printf("Type: PLUS, text: "SV_FMT"\n", SV_ARG(token.text));
             break;
         case TOKEN_MINUS:
-            typeString = "MINUS";
+            printf("Type: MINUS, text: "SV_FMT"\n", SV_ARG(token.text));
             break;
         case TOKEN_STAR:
-            typeString = "STAR";
+            printf("Type: STAR, text: "SV_FMT"\n", SV_ARG(token.text));
             break;
         case TOKEN_SLASH:
-            typeString = "SLASH";
+            printf("Type: SLASH, text: "SV_FMT"\n", SV_ARG(token.text));
             break;
         case TOKEN_FUNC_KEYWORD:
-            typeString = "FUNC_KEYWORD";
+            printf("Type: FUNC_KEYWORD, text: "SV_FMT"\n", SV_ARG(token.text));
             break;
         case TOKEN_RETURN_KEYWORD:
-            typeString = "RETURN_KEYWORD";
+            printf("Type: RETURN_KEYWORD, text: "SV_FMT"\n", SV_ARG(token.text));
+            break;
+        case TOKEN_IF_KEYWORD:
+            printf("Type: IF_KEYWORD, text: "SV_FMT"\n", SV_ARG(token.text));
+            break;
+        case TOKEN_ELSE_KEYWORD:
+            printf("Type: ELSE_KEYWORD, text: "SV_FMT"\n", SV_ARG(token.text));
+            break;
+        case TOKEN_WHILE_KEYWORD:
+            printf("Type: WHILE_KEYWORD, text: "SV_FMT"\n", SV_ARG(token.text));
+            break;
+        case TOKEN_INTTYPE_KEYWORD:
+            printf("Type: INTTYPE_KEYWORD, text: "SV_FMT"\n", SV_ARG(token.text));
+            break;
+        case TOKEN_BOOLTYPE_KEYWORD:
+            printf("Type: BOOLTYPE_KEYWORD, text: "SV_FMT"\n", SV_ARG(token.text));
             break;
         case TOKEN_IDENT:
-            typeString = "IDENT";
+            printf("Type: IDENT, text: "SV_FMT"\n", SV_ARG(token.text));
             break;
         case TOKEN_INT:
-            typeString = "INT";
+            printf("Type: INT, text: "SV_FMT"\n", SV_ARG(token.text));
             break;
-        default:
-            assert(false && "Non-exhaustive cases in printToken");
+        case TOKEN_BOOL:
+            printf("Type: BOOL, text: "SV_FMT"\n", SV_ARG(token.text));
+            break;
     }
-    printf("Type: %s, text: "SV_FMT"\n", typeString, SV_ARG(token.text));
+    static_assert(TOKEN_COUNT == 27, "Non-exhaustive cases (printToken)");
 }
 
 
@@ -619,6 +700,8 @@ void printToken(Token token) {
 ////////////////
 // Parser API //
 ////////////////
+
+#define NUM_BINOP_NODES 5
 
 typedef enum {
     NODE_FUNCTION,
@@ -631,14 +714,18 @@ typedef enum {
     NODE_DECLARATION,
     NODE_ASSIGNMENT,
 
-    // Expressions
+    // Arithmetic operators 
     NODE_PLUS,
     NODE_MINUS,
     NODE_TIMES,
     NODE_DIVIDE,
 
+    // Boolean operators
+    NODE_IS_EQUAL,
+
     // Literals
     NODE_INT,
+    NODE_BOOL,
 
     // Control flow
     NODE_IF,
@@ -646,7 +733,10 @@ typedef enum {
     NODE_WHILE,
 
     // Identifiers
-    NODE_IDENT
+    NODE_IDENT,
+
+    //Used for static asserts
+    NODE_COUNT,
 } Node_Type;
 
 typedef union {
@@ -690,6 +780,7 @@ typedef union {
     };
     String_View identName;   // NODE_IDENT
     int intValue;            // NODE_INT
+    bool boolValue;          // NODE_BOOL
 } Node_Data;
 
 typedef struct {
@@ -701,7 +792,9 @@ bool isNodeOperator(Node_Type type) {
     return type == NODE_PLUS
         || type == NODE_MINUS
         || type == NODE_TIMES
-        || type == NODE_DIVIDE;
+        || type == NODE_DIVIDE
+        || type == NODE_IS_EQUAL;
+    static_assert(NUM_BINOP_NODES == 5, "Non-exhaustive cases (isNodeOperator)");
 }
 
 typedef struct {
@@ -750,6 +843,13 @@ inline size_t addIntNode(AST_Node_List* list, int value) {
     return addNode(list, node);
 }
 
+inline size_t addBoolNode(AST_Node_List* list, bool value) {
+    AST_Node node;
+    node.type = NODE_BOOL;
+    node.data.boolValue = value;
+    return addNode(list, node);
+}
+
 inline size_t addIdentNode(AST_Node_List* list, String_View name) {
     AST_Node node;
     node.type = NODE_IDENT;
@@ -788,7 +888,7 @@ inline size_t addIfOrWhileNode(AST_Node_List* list, Node_Type type, size_t condi
 }
 
 inline size_t addBinaryOpNode(AST_Node_List* list, size_t left, Token token, size_t right) {
-    assert(isOperator(token));
+    assert(isOperator(token.type));
     AST_Node node;
     switch (token.type) {
         case TOKEN_PLUS:
@@ -803,10 +903,14 @@ inline size_t addBinaryOpNode(AST_Node_List* list, size_t left, Token token, siz
         case TOKEN_SLASH:
             node.type = NODE_DIVIDE;
             break;
+        case TOKEN_DOUBLE_EQUALS:
+            node.type = NODE_IS_EQUAL;
+            break;
         default:
             printf("Unknown token operator type: %d\n", token.type);
             assert(false && "Unexhausted cases (addBinaryOpNode)");
     }
+    static_assert(NUM_BINOP_TOKENS == 5, "Non-exhaustive cases (addBinaryOpNode)");
     node.data.binaryOpLeft = left;
     node.data.binaryOpRight = right;
     return addNode(list, node);
@@ -814,30 +918,36 @@ inline size_t addBinaryOpNode(AST_Node_List* list, size_t left, Token token, siz
 
 int getPrecedence(Token_Type type) {
     switch (type) {
+        case TOKEN_DOUBLE_EQUALS:
+            return 10;
         case TOKEN_PLUS:
         case TOKEN_MINUS:
-            return 10;
+            return 20;
         case TOKEN_STAR:
         case TOKEN_SLASH:
-            return 20;
+            return 30;
         default:
             printf("Unknown token operator type: %d\n", type);
             assert(false && "Called with a non-operator token or non-exhaustive cases (getPrecedence)");
     }
+    static_assert(NUM_BINOP_TOKENS == 5, "Non-exhaustive cases (getPrecedence)");
 }
 
 int getNodePrecedence(Node_Type type) {
     switch (type) {
+        case NODE_IS_EQUAL:
+            return 10;
         case NODE_PLUS:
         case NODE_MINUS:
-            return 10;
+            return 20;
         case NODE_TIMES:
         case NODE_DIVIDE:
-            return 20;
+            return 30;
         default:
             printf("Unknown node operator type: %d\n", type);
             assert(false && "Called with a non-operator node or non-exhaustive cases (getNodePrecedence)");
     }
+    static_assert(NUM_BINOP_NODES == 5, "Non-exhaustive cases (getNodePrecedence)");
 }
 
 void recoverByEatUntil(Lexer* lexer, Token_Type wanted) {
@@ -875,6 +985,8 @@ size_t parseTerm(AST_Node_List* list, Lexer* lexer) {
     switch (token.type) {
         case TOKEN_INT:
             return addIntNode(list, token.intValue);
+        case TOKEN_BOOL:
+            return addBoolNode(list, token.boolValue);
         case TOKEN_IDENT:
             return addIdentNode(list, token.text);
         default:
@@ -886,7 +998,7 @@ size_t parseTerm(AST_Node_List* list, Lexer* lexer) {
 
 size_t parseIncreasingPrecedence(AST_Node_List* list, Lexer* lexer, size_t left, int precedence) {
     Token token = peekToken(lexer);
-    assert(isOperator(token));
+    assert(isOperator(token.type));
 
     int thisPrecedence = getPrecedence(token.type);
     if (thisPrecedence > precedence) {
@@ -924,7 +1036,7 @@ size_t parseExpr(AST_Node_List* list, Lexer* lexer, int precedence) {
     }
 
     peeked = peekToken(lexer);
-    while (isOperator(peeked)) {
+    while (isOperator(peeked.type)) {
         size_t op = parseIncreasingPrecedence(list, lexer, term, precedence);
         if (op == SIZE_MAX) {
             return SIZE_MAX;
@@ -968,7 +1080,7 @@ size_t parseStatement(AST_Node_List* list, Lexer* lexer) {
             switch (token.type) {
                 case TOKEN_COLON: {
                     token = getToken(lexer);
-                    if (token.type != TOKEN_INTTYPE_KEYWORD) {
+                    if (!isTypeToken(token.type)) {
                         printErrorMessage(lexer->fileName, scopeToken(token), "Expected a type name, but got \""SV_FMT"\"", SV_ARG(token.text));
                         recoverByEatUntil(lexer, TOKEN_SEMICOLON);
                         return SIZE_MAX;
@@ -1174,9 +1286,9 @@ size_t parseFunction(AST_Node_List* list, Lexer* lexer) {
     node.data.functionName = token.text;
 
     token = getToken(lexer);
-    if (token.type != TOKEN_DCOLON) {
+    if (token.type != TOKEN_DOUBLE_COLON) {
         printErrorMessage(lexer->fileName, scopeToken(token), "Expected \"::\" in function definition, got \""SV_FMT"\"", SV_ARG(token.text));
-        recoverByEatUntil(lexer, TOKEN_DCOLON);
+        recoverByEatUntil(lexer, TOKEN_DOUBLE_COLON);
         success = false;
     }
 
@@ -1345,6 +1457,14 @@ void printASTIndented(int indent, AST_Node_List list, size_t root) {
             printIndented(indent, ")\n");
             break;
         }
+        case NODE_IS_EQUAL: {
+            printIndented(indent, "type=IS_EQUAL, left=(\n");
+            printASTIndented(indent + 1, list, node.data.binaryOpLeft);
+            printIndented(indent, "), right=(\n");
+            printASTIndented(indent + 1, list, node.data.binaryOpRight);
+            printIndented(indent, ")\n");
+            break;
+        }
         case NODE_IF: {
             printIndented(indent, "type=IF, condition=(\n");
             printASTIndented(indent + 1, list, node.data.controlCondition);
@@ -1371,14 +1491,16 @@ void printASTIndented(int indent, AST_Node_List list, size_t root) {
             printIndented(indent, "type=INT, value=%d\n", node.data.intValue);
             break;
         }
+        case NODE_BOOL: {
+            printIndented(indent, "type=BOOL, value=%d\n", node.data.boolValue);
+            break;
+        }
         case NODE_IDENT: {
             printIndented(indent, "type=IDENT, name="SV_FMT"\n", SV_ARG(node.data.identName));
             break;
         }
-        default:
-            printf("Unknown node type: %d\n", node.type);
-            assert(false && "Non-exhaustive cases in printASTIndented");
     }
+    static_assert(NODE_COUNT == 18, "Non-exhaustive cases (printASTIndented)");
 }
 
 inline void printAST(AST_Node_List list, size_t root) {
@@ -1515,6 +1637,13 @@ bool typeCheckAndVerifyExpr(AST_Node_List list, size_t root, Symbol_Table* table
             }
             return true;
         }
+        case NODE_BOOL: {
+            if (!svEqualsCStr(expectedType, "bool")) {
+                fprintf(stderr, "ERROR! Type mismatch. Expected "SV_FMT", got bool\n", SV_ARG(expectedType));
+                return false;
+            }
+            return true;
+        }
         case NODE_IDENT: {
             int index = tableFindSymbol(table, expr.data.identName);
             if (index < 0) {
@@ -1532,6 +1661,11 @@ bool typeCheckAndVerifyExpr(AST_Node_List list, size_t root, Symbol_Table* table
                 return false;
             }
             return typeCheckAndVerifyExpr(list, expr.data.binaryOpRight, table, expectedType);
+        }
+        case NODE_IS_EQUAL: {
+            // IMPORTANT: 1
+            // Check if both sides are the same type. This ideally requires a rewrite of the typeCheckAndVerifyX functions in order to query types instead.
+            return true;
         }
         default:
             printf("Unknown expression node: %d\n", expr.type);
@@ -1556,6 +1690,10 @@ void emitTerm(FILE* file, AST_Node_List list, size_t root) {
     switch (term.type) {
         case NODE_INT: {
             tryFPrintf(file, "%d", term.data.intValue);
+            break;
+        }
+        case NODE_BOOL: {
+            tryFPrintf(file, "%d", term.data.boolValue);
             break;
         }
         case NODE_IDENT: {
@@ -1601,7 +1739,14 @@ void emitExpr(FILE* file, AST_Node_List list, size_t root, int precedence) {
                 emitExpr(file, list, expr.data.binaryOpRight, thisPrecedence);
                 break;
             }
+            case NODE_IS_EQUAL: {
+                emitExpr(file, list, expr.data.binaryOpLeft, thisPrecedence);
+                tryFPuts(" == ", file);
+                emitExpr(file, list, expr.data.binaryOpRight, thisPrecedence);
+                break;
+            }
         }
+        static_assert(NUM_BINOP_NODES == 5, "Non-exhaustive cases (emitExpr)");
 
         if (thisPrecedence < precedence) {
             tryFPuts(")", file);
