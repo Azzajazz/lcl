@@ -137,6 +137,10 @@ typedef struct {
 #define SV_FMT "%.*s"
 #define SV_ARG(sv) (sv).length, (sv).start
 
+bool svIsEmpty(String_View sv) {
+    return sv.length == 0;
+}
+
 String_View svFromCStr(char* cstr) {
     return (String_View){cstr, (int)strlen(cstr)};
 }
@@ -1527,9 +1531,9 @@ inline void printAST(AST_Node_List list, size_t root) {
 
 
 
-///////////////////
-// Sanitizer API //
-///////////////////
+//////////////////////
+// Symbol table API //
+//////////////////////
 
 typedef struct {
     int scopeId;
@@ -1661,6 +1665,151 @@ void initSymbolTable(Symbol_Table* table, AST_Node_List list, size_t root) {
     //Temporary: When we do full programs, this will be different.
     addFunctionData(table, list, root, -1);
 }
+
+Symbol_Entry tableLookupSymbol(Symbol_Table* table, int scopeId, String_View name) {
+    for (int i = 0; i < table->symbolsLength; ++i) {
+        Symbol_Entry entry = table->symbols[i];
+        if (entry.scopeId == scopeId && svEquals(entry.name, name)) {
+            return entry;
+        }
+    }
+    assert(false && "Unreachable (tableLookupSymbol)");
+}
+
+
+
+///////////////////////
+// Type checking API //
+///////////////////////
+
+//TODO: Using String_View for types seems inefficient and sloppy. This really should be an enum for primitive types and reworked to allow for user-defined types.
+bool typeCheckFunction(Symbol_Table* table, AST_Node_List list, size_t root);
+bool expectScopeType(Symbol_Table* table, AST_Node_List list, size_t root, String_View expected);
+
+String_View getExprType(Symbol_Table* table, AST_Node_List list, size_t root, int scopeId);
+
+bool typeCheckFunction(Symbol_Table* table, AST_Node_List list, size_t root) {
+    AST_Node function = list.nodes[root];
+    assert(function.type == NODE_FUNCTION);
+    
+    return expectScopeType(table, list, function.data.functionBody, function.data.functionRetType);
+}
+
+bool expectScopeType(Symbol_Table* table, AST_Node_List list, size_t root, String_View expected) {
+    bool success = true;
+    AST_Node scope = list.nodes[root];
+    assert(scope.type == NODE_SCOPE);
+
+    size_t statementsI = scope.data.scopeStatements;
+    while (statementsI != SIZE_MAX) {
+        AST_Node statements = list.nodes[statementsI];
+        AST_Node statement = list.nodes[statements.data.statementStatement];
+
+        switch (statement.type) {
+            case NODE_RETURN: {
+                String_View exprType = getExprType(table, list, statement.data.returnExpr, scope.data.scopeId);
+                if (svIsEmpty(exprType)) {
+                    fprintf(stderr, "ERROR! Could not evaluate type of return expression.\n");
+                    success = false;
+                }
+                if (!svEquals(exprType, expected)) {
+                    fprintf(stderr, "ERROR! Type mismatch. Expected "SV_FMT", got "SV_FMT"\n", SV_ARG(expected), SV_ARG(exprType));
+                    success = false;
+                }
+                break;
+            }
+            case NODE_ASSIGNMENT: {
+                String_View varType = tableLookupSymbol(table, scope.data.scopeId, statement.data.assignmentName).type;
+                String_View exprType = getExprType(table, list, statement.data.assignmentExpr, scope.data.scopeId);
+                if (svIsEmpty(exprType)) {
+                    //TODO: IMPROVE THIS ERROR MESSAGE!!!!! Lexical scoping of AST_Nodes
+                    fprintf(stderr, "ERROR! Could not evalutate the right hand side of assignment\n");
+                    success = false;
+                }
+                if (!svEquals(varType, exprType)) {
+                    fprintf(stderr, "ERROR! Type mismatch. Expected "SV_FMT", got "SV_FMT"\n", SV_ARG(varType), SV_ARG(exprType));
+                    success = false;
+                }
+                break;
+            }
+            case NODE_IF:
+            case NODE_WHILE: {
+                String_View conditionType = getExprType(table, list, statement.data.controlCondition, scope.data.scopeId);
+                if (svIsEmpty(conditionType)) {
+                    fprintf(stderr, "ERROR! Could not evaluate type of control condition\n");
+                    success = false;
+                }
+                if (!svEqualsCStr(conditionType, "bool")) {
+                    fprintf(stderr, "ERROR! Type mismatch. Expected bool, got "SV_FMT"\n", SV_ARG(conditionType));
+                    success = false;
+                }
+
+                expectScopeType(table, list, statement.data.controlScope, svFromCStr("unit"));
+                break;
+            }
+            case NODE_ELSE: {
+                if (!expectScopeType(table, list, statement.data.elseScope, svFromCStr("unit"))) {
+                    success = false;
+                }
+                break;
+            }
+            case NODE_SCOPE: {
+                if (!expectScopeType(table, list, statements.data.statementStatement, svFromCStr("unit"))) {
+                    success = false;
+                }
+                break;
+            }
+        }
+
+        statementsI = statements.data.statementNext;
+    }
+    return success;
+}
+
+String_View getExprType(Symbol_Table* table, AST_Node_List list, size_t root, int scopeId) {
+    AST_Node expr = list.nodes[root];
+    switch (expr.type) {
+        case NODE_INT: {
+            return svFromCStr("int");
+        }
+        case NODE_BOOL: {
+            return svFromCStr("bool");
+        }
+        case NODE_IDENT: {
+            return tableLookupSymbol(table, scopeId, expr.data.identName).type;
+        }
+        case NODE_PLUS:
+        case NODE_MINUS:
+        case NODE_TIMES:
+        case NODE_DIVIDE: {
+            String_View left = getExprType(table, list, expr.data.binaryOpLeft, scopeId);
+            String_View right = getExprType(table, list, expr.data.binaryOpRight, scopeId);
+            if (svIsEmpty(left) || svIsEmpty(right)) {
+                fprintf(stderr, "ERROR! Could not evaluate expression type\n");
+                return svFromCStr("");
+            }
+            if (!svEquals(left, right)) {
+                fprintf(stderr, "ERROR! Type mismatch. Left is "SV_FMT", right is "SV_FMT"\n", SV_ARG(left), SV_ARG(right));
+                return svFromCStr("");
+            }
+            return left;
+        }
+        case NODE_IS_EQUAL: {
+            String_View left = getExprType(table, list, expr.data.binaryOpLeft, scopeId);
+            String_View right = getExprType(table, list, expr.data.binaryOpRight, scopeId);
+            if (svIsEmpty(left) || svIsEmpty(right)) {
+                fprintf(stderr, "ERROR! Could not evaluate expression type\n");
+                return svFromCStr("");
+            }
+            if (!svEquals(left, right)) {
+                fprintf(stderr, "ERROR! Type mismatch. Left is "SV_FMT", right is "SV_FMT"\n", SV_ARG(left), SV_ARG(right));
+                return svFromCStr("");
+            }
+            return svFromCStr("bool");
+        }
+    }
+}
+
 
 
 /////////////////
@@ -1875,7 +2024,15 @@ int main() {
     printAST(list, function);
     Symbol_Table table = makeSymbolTable(8);
     initSymbolTable(&table, list, function);
+
+    printf("\n\n\n");
     printSymbolTable(table);
+    printf("\n\n\n");
+
+    bool typeChecked = typeCheckFunction(&table, list, function);
+    if (!typeChecked) {
+        return 1;
+    }
 
     FILE* output = tryFOpen("examples/simple.c", "wb");
     emitFunction(output, list, function);
