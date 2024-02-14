@@ -10,7 +10,8 @@
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // IMPORTANT:
-// 1: NODE_IS_EQUAL is not type checked. Could require a rewrite of the typeCheckAndVerifyX API
+// 1: `NODE_IS_EQUAL` is not type checked. Could require a rewrite of the `typeCheckAndVerifyX` API
+// 2: `AST_Node_List` could be a bucket array to ensure pointer stability. Then we don't have to keep passing indexes into the list around everywhere and we could, for example, store the pointers to the inner nodes directly on the `AST_Node`s.
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 //////////////
@@ -752,7 +753,10 @@ typedef union {
         String_View argType;
         size_t argNext;
     };
-    size_t scopeStatements;  // NODE_SCOPE
+    struct {                 // NODE_SCOPE
+        size_t scopeStatements;
+        int scopeId; // Necessary for variable info lookup in symbol table
+    };
     // Represents a linked list of expressions in a scope.
     struct {                 // NODE_STATEMENTS
         size_t statementStatement;
@@ -787,6 +791,11 @@ typedef struct {
     Node_Type type;
     Node_Data data;
 } AST_Node;
+
+int getScopeId() {
+    static int id = 0;
+    return id++;
+}
 
 bool isNodeOperator(Node_Type type) {
     return type == NODE_PLUS
@@ -1058,9 +1067,10 @@ size_t parseExpr(AST_Node_List* list, Lexer* lexer, int precedence) {
 }
 
 size_t parseStatement(AST_Node_List* list, Lexer* lexer) {
-    Token token = getToken(lexer);
+    Token token = peekToken(lexer);
     switch (token.type) {
         case TOKEN_RETURN_KEYWORD: {
+            getToken(lexer); // Eat the "return"
             size_t inner = parseExpr(list, lexer, -1);
             if (inner == SIZE_MAX) {
                recoverByEatUntil(lexer, TOKEN_SEMICOLON);
@@ -1074,7 +1084,11 @@ size_t parseStatement(AST_Node_List* list, Lexer* lexer) {
             }
             return result;
         }
+        case TOKEN_LBRACE: {
+            return parseScope(list, lexer);
+        }
         case TOKEN_IDENT: {
+            getToken(lexer); // Eat the ident
             String_View name = token.text;
             token = getToken(lexer);
             switch (token.type) {
@@ -1115,6 +1129,7 @@ size_t parseStatement(AST_Node_List* list, Lexer* lexer) {
             break;
         }
         case TOKEN_IF_KEYWORD: {
+            getToken(lexer); // Eat the "if"
             //TODO: Error recovery from parseExpr will eat until a semicolon, but that's not great here.
             size_t condition = parseExpr(list, lexer, -1);
             if (condition == SIZE_MAX) {
@@ -1128,6 +1143,7 @@ size_t parseStatement(AST_Node_List* list, Lexer* lexer) {
             return addIfOrWhileNode(list, NODE_IF, condition, scope);
         }
         case TOKEN_ELSE_KEYWORD: {
+            getToken(lexer); // Eat the "else"
             size_t scope = parseScope(list, lexer);
             if (scope == SIZE_MAX) {
                 return SIZE_MAX;
@@ -1135,6 +1151,7 @@ size_t parseStatement(AST_Node_List* list, Lexer* lexer) {
             return addElseNode(list, scope);
         }
         case TOKEN_WHILE_KEYWORD: {
+            getToken(lexer); // Eat the "while"
             size_t condition = parseExpr(list, lexer, -1);
             if (condition == SIZE_MAX) {
                 recoverByEatUntil(lexer, TOKEN_RBRACE);
@@ -1191,6 +1208,7 @@ size_t parseScope(AST_Node_List* list, Lexer* lexer) {
 
     AST_Node node;
     node.type = NODE_SCOPE;
+    node.data.scopeId = getScopeId();
 
     bool success;
     node.data.scopeStatements = parseStatements(list, lexer, &success);
@@ -1514,164 +1532,136 @@ inline void printAST(AST_Node_List list, size_t root) {
 ///////////////////
 
 typedef struct {
+    int scopeId;
     String_View name;
     String_View type;
-} Symbol_Info;
+} Symbol_Entry;
 
 typedef struct {
-    Symbol_Info* symbols;
-    int length;
-    int capacity;
+    int id;
+    int parentId; // ID of the immediate parent of the scope with ID `id`.
+} Scope_Parent_Entry;
+
+typedef struct {
+    // TODO: This should be a hash map
+    Symbol_Entry* symbols;
+    int symbolsLength;
+    int symbolsCapacity;
+
+    
+    // TODO: This should be a hash map
+    Scope_Parent_Entry* scopeParents;
+    int parentsLength;
+    int parentsCapacity;
 } Symbol_Table;
 
-inline Symbol_Table makeSymbolTable(int capacity) {
+Symbol_Table makeSymbolTable(int capacity) {
     return (Symbol_Table){
-        .symbols = malloc(capacity * sizeof(Symbol_Info)),
-        .length = 0,
-        .capacity = capacity,
+        .symbols = malloc(capacity * sizeof(Symbol_Entry)),
+        .symbolsLength = 0,
+        .symbolsCapacity = capacity,
+
+        .scopeParents = malloc(capacity * sizeof(Scope_Parent_Entry)),
+        .parentsLength = 0,
+        .parentsCapacity = capacity,
     };
 }
 
-inline void tablePushSymbol(Symbol_Table* table, String_View name, String_View type) {
-    if (table->length == table->capacity) {
-        table->capacity *= 2;
-        table->symbols = realloc(table->symbols, table->capacity * sizeof(Symbol_Info));
+void printSymbolTable(Symbol_Table table) {
+    printf("Symbols:\n");
+    for (int i = 0; i < table.symbolsLength; ++i) {
+        Symbol_Entry entry = table.symbols[i];
+        printf("Scope id: %d, Name: "SV_FMT", Type: "SV_FMT"\n", entry.scopeId, SV_ARG(entry.name), SV_ARG(entry.type));
     }
-    table->symbols[table->length++] = (Symbol_Info){name, type};
+
+    printf("--------------------------------------------------\n");
+
+    printf("Parent data:\n");
+    for (int i = 0; i < table.parentsLength; ++i) {
+        Scope_Parent_Entry entry = table.scopeParents[i];
+        printf("This id: %d, Parent id: %d\n", entry.id, entry.parentId);
+    }
 }
 
-inline void tableRemoveSymbols(Symbol_Table* table, int number) {
-    assert(table->length >= number);
-    table->length -= number;
+void addSymbol(Symbol_Table* table, int scopeId, String_View name, String_View type) {
+    if (table->symbolsLength == table->symbolsCapacity) {
+        table->symbolsCapacity *= 2;
+        table->symbols = realloc(table->symbols, table->symbolsCapacity * sizeof(Symbol_Entry));
+    }
+    table->symbols[table->symbolsLength++] = (Symbol_Entry){scopeId, name, type};
 }
 
-inline int tableFindSymbol(Symbol_Table* table, String_View name) {
-    for (int i = table->length - 1; i >= 0; --i) {
-        if (svEquals(table->symbols[i].name, name)) {
-            return i;
+void addScopeParent(Symbol_Table* table, int id, int parentId) {
+    if (table->parentsLength == table->parentsCapacity) {
+        table->parentsCapacity *= 2;
+        table->scopeParents = realloc(table->scopeParents, table->parentsCapacity * sizeof(Scope_Parent_Entry));
+    }
+    table->scopeParents[table->parentsLength++] = (Scope_Parent_Entry){id, parentId};
+}
+
+void addScopeData(Symbol_Table* table, AST_Node_List list, size_t root, int parentId) {
+    AST_Node scope = list.nodes[root];
+    assert(scope.type == NODE_SCOPE);
+
+    size_t statementsI = scope.data.scopeStatements;
+    // If the scope is empty, there's no data to add.
+    if (statementsI == SIZE_MAX) {
+        return;
+    }
+
+    addScopeParent(table, scope.data.scopeId, parentId);
+    while (statementsI != SIZE_MAX) {
+        AST_Node statements = list.nodes[statementsI];
+        AST_Node statement = list.nodes[statements.data.statementStatement];
+
+        switch (statement.type) {
+            case NODE_DECLARATION: {
+                addSymbol(table, scope.data.scopeId, statement.data.declarationName, statement.data.declarationType);
+                break;
+            }
+            case NODE_SCOPE: {
+                addScopeData(table, list, statements.data.statementStatement, scope.data.scopeId);
+                break;
+            }
+            case NODE_IF:
+            case NODE_WHILE: {
+                addScopeData(table, list, statement.data.controlScope, scope.data.scopeId);
+                break;
+            }
+            case NODE_ELSE: {
+                addScopeData(table, list, statement.data.elseScope, scope.data.scopeId);
+                break;
+            }
         }
+        statementsI = statements.data.statementNext;
     }
-    return -1;
 }
 
-bool typeCheckAndVerifyFunction(AST_Node_List list, size_t root, Symbol_Table* table);
-bool typeCheckAndVerifyScope(AST_Node_List list, size_t root, Symbol_Table* table, String_View expectedType);
-bool typeCheckAndVerifyStatement(AST_Node_List list, size_t root, Symbol_Table* table, String_View expectedType);
-bool typeCheckAndVerifyExpr(AST_Node_List list, size_t root, Symbol_Table* table, String_View expectedType);
-
-bool typeCheckAndVerifyFunction(AST_Node_List list, size_t root, Symbol_Table* table) {
+void addFunctionData(Symbol_Table* table, AST_Node_List list, size_t root, int parentId) {
     AST_Node function = list.nodes[root];
     assert(function.type == NODE_FUNCTION);
+
+    AST_Node body = list.nodes[function.data.functionBody];
+    // If the body of the function is empty, then we don't need to add any of the heirarchy data or argument symbols.
+    if (body.data.scopeStatements == SIZE_MAX) {
+        return;
+    }
 
     size_t args = function.data.functionArgs;
     while (args != SIZE_MAX) {
         AST_Node arg = list.nodes[args];
-        tablePushSymbol(table, arg.data.argName, arg.data.argType);
+        addSymbol(table, body.data.scopeId, arg.data.argName, arg.data.argType);
         args = arg.data.argNext;
     }
 
-    return typeCheckAndVerifyScope(list, function.data.functionBody, table, function.data.functionRetType);
+    addScopeData(table, list, function.data.functionBody, parentId);
 }
 
-bool typeCheckAndVerifyScope(AST_Node_List list, size_t root, Symbol_Table* table, String_View expectedType) {
-    AST_Node scope = list.nodes[root];
-    assert(scope.type == NODE_SCOPE);
-    bool success = true;
-
-    size_t statements = scope.data.scopeStatements;
-    while (statements != SIZE_MAX) {
-        AST_Node statement = list.nodes[statements];
-        bool statementSuccess = typeCheckAndVerifyStatement(list, statement.data.statementStatement, table, expectedType);
-        if (!statementSuccess) {
-            success = false;
-        }
-        statements = statement.data.statementNext;
-    }
-
-    return success;
+void initSymbolTable(Symbol_Table* table, AST_Node_List list, size_t root) {
+    //Temporary: When we do full programs, this will be different.
+    addFunctionData(table, list, root, -1);
 }
 
-bool typeCheckAndVerifyStatement(AST_Node_List list, size_t root, Symbol_Table* table, String_View expectedType) {
-    AST_Node statement = list.nodes[root];
-    switch (statement.type) {
-        case NODE_RETURN: {
-            return typeCheckAndVerifyExpr(list, statement.data.returnExpr, table, expectedType);
-        }
-        case NODE_DECLARATION: {
-            tablePushSymbol(table, statement.data.declarationName, statement.data.declarationType);
-            return true;
-        }
-        case NODE_ASSIGNMENT: {
-            int index = tableFindSymbol(table, statement.data.assignmentName);
-            if (index < 0) {
-                fprintf(stderr, "ERROR! Variable \""SV_FMT"\" used before it was declared\n", SV_ARG(statement.data.assignmentName));
-                return false;
-            }
-            
-            return typeCheckAndVerifyExpr(list, statement.data.assignmentExpr, table, table->symbols[index].type);
-        }
-        case NODE_WHILE:
-        case NODE_IF: {
-            if (!typeCheckAndVerifyExpr(list, statement.data.controlCondition, table, svFromCStr("bool"))) {
-                return false;
-            }
-            return typeCheckAndVerifyScope(list, statement.data.controlScope, table, svFromCStr("unit"));
-        }
-        case NODE_ELSE: {
-            return typeCheckAndVerifyScope(list, statement.data.elseScope, table, svFromCStr("unit"));
-        }
-        default: {
-            printf("Unknown statement type: %d\n", statement.type);
-            assert(false && "This is not a statement or non-exhaustive cases (typeCheckAndVerifyStatement)");
-        }
-    }
-}
-
-bool typeCheckAndVerifyExpr(AST_Node_List list, size_t root, Symbol_Table* table, String_View expectedType) {
-    AST_Node expr = list.nodes[root];
-    switch (expr.type) {
-        case NODE_INT: {
-            if (!svEqualsCStr(expectedType, "int")) {
-                fprintf(stderr, "ERROR! Type mismatch. Expected "SV_FMT", got int\n", SV_ARG(expectedType));
-                return false;
-            }
-            return true;
-        }
-        case NODE_BOOL: {
-            if (!svEqualsCStr(expectedType, "bool")) {
-                fprintf(stderr, "ERROR! Type mismatch. Expected "SV_FMT", got bool\n", SV_ARG(expectedType));
-                return false;
-            }
-            return true;
-        }
-        case NODE_IDENT: {
-            int index = tableFindSymbol(table, expr.data.identName);
-            if (index < 0) {
-                fprintf(stderr, "ERROR! Variable \""SV_FMT"\" used before it was declared\n", SV_ARG(expr.data.assignmentName));
-                return false;
-            }
-            return svEquals(expectedType, table->symbols[index].type);
-        }
-        case NODE_PLUS:
-        case NODE_MINUS:
-        case NODE_TIMES:
-        case NODE_DIVIDE: {
-            bool leftSuccess = typeCheckAndVerifyExpr(list, expr.data.binaryOpLeft, table, expectedType);
-            if (!leftSuccess) {
-                return false;
-            }
-            return typeCheckAndVerifyExpr(list, expr.data.binaryOpRight, table, expectedType);
-        }
-        case NODE_IS_EQUAL: {
-            // IMPORTANT: 1
-            // Check if both sides are the same type. This ideally requires a rewrite of the typeCheckAndVerifyX functions in order to query types instead.
-            return true;
-        }
-        default:
-            printf("Unknown expression node: %d\n", expr.type);
-            assert(false && "Not an expression or non-exhaustive cases (typeCheckAndVerifyExpr)");
-    }
-}
 
 /////////////////
 // Emitter API //
@@ -1796,6 +1786,10 @@ void emitStatement(int indent, FILE* file, AST_Node_List list, size_t root) {
             emitScope(0, indent, file, list, statement.data.controlScope);
             break;
         }
+        case NODE_SCOPE: {
+            emitScope(indent, indent, file, list, root);
+            break;
+        }
         default:
             printf("Unexpected node type: %d\n", statement.type);
             assert(false && "Not a statement type or non-exhaustive cases (emitStatement)");
@@ -1880,10 +1874,9 @@ int main() {
     }
     printAST(list, function);
     Symbol_Table table = makeSymbolTable(8);
-    bool valid = typeCheckAndVerifyFunction(list, function, &table);
-    if (!valid) {
-        return 1;
-    }
+    initSymbolTable(&table, list, function);
+    printSymbolTable(table);
+
     FILE* output = tryFOpen("examples/simple.c", "wb");
     emitFunction(output, list, function);
     return 0;
