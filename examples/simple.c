@@ -5,6 +5,7 @@ int main() {
         int b;
         {
             bool c;
+            b = 2;
         }
     }
     else {

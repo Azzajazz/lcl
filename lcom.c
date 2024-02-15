@@ -1666,14 +1666,145 @@ void initSymbolTable(Symbol_Table* table, AST_Node_List list, size_t root) {
     addFunctionData(table, list, root, -1);
 }
 
-Symbol_Entry tableLookupSymbol(Symbol_Table* table, int scopeId, String_View name) {
-    for (int i = 0; i < table->symbolsLength; ++i) {
-        Symbol_Entry entry = table->symbols[i];
-        if (entry.scopeId == scopeId && svEquals(entry.name, name)) {
+Scope_Parent_Entry tableLookupParent(Symbol_Table* table, int scopeId) {
+    for (int i = 0; i < table->parentsLength; ++i) {
+        Scope_Parent_Entry entry = table->scopeParents[i];
+        if (entry.id == scopeId) {
             return entry;
         }
     }
-    assert(false && "Unreachable (tableLookupSymbol)");
+    assert(false && "Unreachable (tableLookupParent)");
+}
+
+typedef struct {
+    bool exists;
+    Symbol_Entry entry;
+} Symbol_Lookup_Result;
+
+Symbol_Lookup_Result tableLookupSymbol(Symbol_Table* table, int scopeId, String_View name) {
+    while (scopeId != -1) {
+        for (int i = 0; i < table->symbolsLength; ++i) {
+            Symbol_Entry entry = table->symbols[i];
+            if (entry.scopeId == scopeId && svEquals(entry.name, name)) {
+                return (Symbol_Lookup_Result){true, entry};
+            }
+        }
+        scopeId = tableLookupParent(table, scopeId).parentId;
+    }
+    return (Symbol_Lookup_Result){false};
+}
+
+
+
+//////////////////////
+// Verification API //
+//////////////////////
+
+bool verifyFunction(Symbol_Table* table, AST_Node_List list, size_t root);
+bool verifyScope(Symbol_Table* table, AST_Node_List list, size_t root);
+bool verifyExpr(Symbol_Table* table, AST_Node_List list, size_t root, int scopeId);
+
+bool verifyFunction(Symbol_Table* table, AST_Node_List list, size_t root) {
+    AST_Node function = list.nodes[root];
+    assert(function.type == NODE_FUNCTION);
+
+    return verifyScope(table, list, function.data.functionBody);
+}
+
+bool verifyScope(Symbol_Table* table, AST_Node_List list, size_t root) {
+    bool success = true;
+
+    AST_Node scope = list.nodes[root];
+    assert(scope.type == NODE_SCOPE);
+
+    size_t statementsI = scope.data.scopeStatements;
+    while (statementsI != SIZE_MAX) {
+        AST_Node statements = list.nodes[statementsI];
+        AST_Node statement = list.nodes[statements.data.statementStatement];
+
+        switch (statement.type) {
+            case NODE_RETURN: {
+                if (!verifyExpr(table, list, statement.data.returnExpr, scope.data.scopeId)) {
+                    success = false;
+                }
+                break;
+            }
+            case NODE_ASSIGNMENT: {
+                Symbol_Lookup_Result result = tableLookupSymbol(table, scope.data.scopeId, statement.data.assignmentName);
+                if (!result.exists) {
+                    fprintf(stderr, "ERROR! Use of undeclared identifier \""SV_FMT"\"\n", SV_ARG(statement.data.assignmentName));
+                    success = false;
+                }
+                break;
+            }
+            case NODE_SCOPE: {
+                if (!verifyScope(table, list, statements.data.statementStatement)) {
+                    success = false;
+                }
+                break;
+            }
+            case NODE_IF:
+            case NODE_WHILE: {
+                if (!verifyExpr(table, list, statement.data.controlCondition, scope.data.scopeId)) {
+                    success = false;
+                }
+                if (!verifyScope(table, list, statement.data.controlScope)) {
+                    success = false;
+                }
+                break;
+            }
+            case NODE_ELSE: {
+                if (!verifyScope(table, list, statement.data.elseScope)) {
+                    success = false;
+                }
+                break;
+            }
+            case NODE_DECLARATION: {
+                break;
+            }
+            default:
+                printf("Unknown statement type: %d\n", statement.type);
+                assert(false && "Not a statement type or non-exhaustive cases (verifyScope)");
+        }
+
+        statementsI = statements.data.statementNext;
+    }
+
+    return success;
+}
+
+bool verifyExpr(Symbol_Table* table, AST_Node_List list, size_t root, int scopeId) {
+    AST_Node expr = list.nodes[root];
+    
+    switch (expr.type) {
+        case NODE_INT:
+        case NODE_BOOL: {
+            return true;
+        }
+
+        case NODE_IDENT: {
+            Symbol_Lookup_Result result = tableLookupSymbol(table, scopeId, expr.data.identName);
+            if (!result.exists) {
+                fprintf(stderr, "ERROR! Variable \""SV_FMT"\" used before it was declared\n", SV_ARG(expr.data.identName));
+                return false;
+            }
+            return true;
+        }
+
+        case NODE_PLUS:
+        case NODE_MINUS:
+        case NODE_TIMES:
+        case NODE_DIVIDE:
+        case NODE_IS_EQUAL: {
+            if (!verifyExpr(table, list, expr.data.binaryOpLeft, scopeId)) {
+                return false;
+            }
+            if (!verifyExpr(table, list, expr.data.binaryOpRight, scopeId)) {
+                return false;
+            }
+            return true;
+        }
+    }
 }
 
 
@@ -1719,7 +1850,9 @@ bool expectScopeType(Symbol_Table* table, AST_Node_List list, size_t root, Strin
                 break;
             }
             case NODE_ASSIGNMENT: {
-                String_View varType = tableLookupSymbol(table, scope.data.scopeId, statement.data.assignmentName).type;
+                Symbol_Lookup_Result var = tableLookupSymbol(table, scope.data.scopeId, statement.data.assignmentName);
+                assert(var.exists);
+                String_View varType = var.entry.type;
                 String_View exprType = getExprType(table, list, statement.data.assignmentExpr, scope.data.scopeId);
                 if (svIsEmpty(exprType)) {
                     //TODO: IMPROVE THIS ERROR MESSAGE!!!!! Lexical scoping of AST_Nodes
@@ -1776,7 +1909,9 @@ String_View getExprType(Symbol_Table* table, AST_Node_List list, size_t root, in
             return svFromCStr("bool");
         }
         case NODE_IDENT: {
-            return tableLookupSymbol(table, scopeId, expr.data.identName).type;
+            Symbol_Lookup_Result result = tableLookupSymbol(table, scopeId, expr.data.identName);
+            assert(result.exists);
+            return result.entry.type;
         }
         case NODE_PLUS:
         case NODE_MINUS:
@@ -2028,6 +2163,11 @@ int main() {
     printf("\n\n\n");
     printSymbolTable(table);
     printf("\n\n\n");
+
+    bool verified = verifyFunction(&table, list, function);
+    if (!verified) {
+        return 1;
+    }
 
     bool typeChecked = typeCheckFunction(&table, list, function);
     if (!typeChecked) {
