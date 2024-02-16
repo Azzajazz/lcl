@@ -1,8 +1,16 @@
 # lcl
 
-This project is a compiler for a toy language. The language is currently in early development and is subject to breaking changes, so use with caution.
+This project is a compiler for a toy language. The language is currently in early development and as such has no stable semantics. Watch this space.
 
-Goals:
-- C-like syntax
-- Strongly typed with type inference
-- Meta-programming capabilities
+## Goals
+This language aims to mitigate a lot of the things that C is missing for ease of use. These include:
+- Polymorphic functions
+- Polymorphic data structures
+- Operator overloading
+- Sane conversions between numeric types
+
+Some extra features that may or may not be added are
+- Function overloading
+- Typeclasses/traits
+
+As development continues, these lists may change.
