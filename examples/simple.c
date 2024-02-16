@@ -10,5 +10,6 @@ int main() {
     }
     else {
         bool c;
+        a = 2;
     }
 }

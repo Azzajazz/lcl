@@ -10,8 +10,7 @@
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 // IMPORTANT:
-// 1: `NODE_IS_EQUAL` is not type checked. Could require a rewrite of the `typeCheckAndVerifyX` API
-// 2: `AST_Node_List` could be a bucket array to ensure pointer stability. Then we don't have to keep passing indexes into the list around everywhere and we could, for example, store the pointers to the inner nodes directly on the `AST_Node`s.
+// None
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 //////////////
@@ -744,54 +743,56 @@ typedef enum {
     NODE_COUNT,
 } Node_Type;
 
+typedef struct AST_Node AST_Node;
+
 typedef union {
     struct {                 // NODE_FUNCTION
         String_View functionName;
-        size_t functionArgs;
-        size_t functionBody;
+        AST_Node* functionArgs;
+        AST_Node* functionBody;
         String_View functionRetType;
     };
     // Represents a linked list of function arguments.
     struct {                 // NODE_ARGS
         String_View argName;
         String_View argType;
-        size_t argNext;
+        AST_Node* argNext;
     };
     struct {                 // NODE_SCOPE
-        size_t scopeStatements;
+        AST_Node* scopeStatements;
         int scopeId; // Necessary for variable info lookup in symbol table
     };
     // Represents a linked list of expressions in a scope.
     struct {                 // NODE_STATEMENTS
-        size_t statementStatement;
-        size_t statementNext;
+        AST_Node* statementStatement;
+        AST_Node* statementNext;
     };
     struct {                 // Binary operations (e.g. NODE_PLUS, NODE_MINUS, ...)
-        size_t binaryOpLeft;
-        size_t binaryOpRight;
+        AST_Node* binaryOpLeft;
+        AST_Node* binaryOpRight;
     };
     struct {                 // Control statements (NODE_IF, NODE_WHILE)
-        size_t controlCondition;
-        size_t controlScope;
+        AST_Node* controlCondition;
+        AST_Node* controlScope;
     };
     struct {                 // NODE_ELSE
-        size_t elseScope;
+        AST_Node* elseScope;
     };
-    size_t returnExpr;       // NODE_RETURN
+    AST_Node* returnExpr;       // NODE_RETURN
     struct {                 // NODE_DELCARATION
         String_View declarationName;
         String_View declarationType;
     };
     struct {                 // NODE_ASSIGNMENT
         String_View assignmentName;
-        size_t assignmentExpr;
+        AST_Node* assignmentExpr;
     };
     String_View identName;   // NODE_IDENT
     int intValue;            // NODE_INT
     bool boolValue;          // NODE_BOOL
 } Node_Data;
 
-typedef struct {
+typedef struct AST_Node {
     Node_Type type;
     Node_Data data;
 } AST_Node;
@@ -812,28 +813,66 @@ bool isNodeOperator(Node_Type type) {
 
 typedef struct {
     AST_Node* nodes;
+    int length;
+} AST_Node_Bucket;
+
+#define INIT_LIST_CAPACITY 128
+
+typedef struct {
+    AST_Node_Bucket* buckets; // The bucket array. This contains pointers to `AST_Node_Bucket`s in order to preserve pointer stability for the nodes in a given bucket.
+    int length;                // Number of valid pointers to buckets
+    int capacity;              // Capacity of the `buckets` array. Used to decide when `buckets` needs to be resized.
+
+    int bucketCapacity;        // The capacity of a single bucket
+} AST_Node_List;
+
+/*
+typedef struct {
+    AST_Node* nodes;
     size_t nodeCount;
     size_t capacity;
 } AST_Node_List;
+*/
 
-inline AST_Node_List makeNodeList(size_t capacity) {
+inline AST_Node_List makeNodeList(int bucketCapacity) {
     return (AST_Node_List){
-        .nodes = malloc(capacity * sizeof(AST_Node)),
-        .nodeCount = 0,
-        .capacity = capacity
+        .buckets = NULL,
+        .length = 0,
+        .capacity = 0,
+        .bucketCapacity = bucketCapacity,
     };
 }
 
-inline size_t addNode(AST_Node_List* list, AST_Node node) {
-    if (list->nodeCount == list->capacity) {
-        list->capacity *= 2;
-        list->nodes = realloc(list->nodes, list->capacity * sizeof(AST_Node));
+inline AST_Node* addNode(AST_Node_List* list, AST_Node node) {
+    if (list->capacity == 0) {
+        assert(list->length == 0);
+        list->capacity = INIT_LIST_CAPACITY;
+        list->buckets = malloc(list->capacity * sizeof(AST_Node_Bucket));
+        list->buckets[0] = (AST_Node_Bucket){
+            .nodes = malloc(list->bucketCapacity * sizeof(AST_Node)),
+            .length = 0,
+        };
+        list->length = 1;
     }
-    list->nodes[list->nodeCount++] = node;
-    return list->nodeCount - 1;
+
+    if (list->buckets[list->length - 1].length == list->bucketCapacity) {
+        if (list->length == list->capacity) {
+            list->capacity *= 2;
+            list->buckets = realloc(list->buckets, list->capacity * sizeof(AST_Node_Bucket));
+        }
+        list->buckets[list->length++] = (AST_Node_Bucket){
+            .nodes = malloc(list->bucketCapacity * sizeof(AST_Node)),
+            .length = 0,
+        };
+    }
+
+    AST_Node_Bucket* lastBucket = &list->buckets[list->length - 1];
+    assert(lastBucket->length < list->bucketCapacity);
+    lastBucket->nodes[lastBucket->length++] = node;
+    return &lastBucket->nodes[lastBucket->length - 1];
 }
 
-inline size_t addDeclarationNode(AST_Node_List* list, String_View name, String_View type) {
+inline AST_Node* addDeclarationNode(AST_Node_List* list, String_View name, String_View type) {
     AST_Node node;
     node.type = NODE_DECLARATION;
     node.data.declarationName = name;
@@ -841,7 +880,7 @@ inline size_t addDeclarationNode(AST_Node_List* list, String_View name, String_V
     return addNode(list, node);
 }
 
-inline size_t addAssignmentNode(AST_Node_List* list, String_View name, size_t expr) {
+inline AST_Node* addAssignmentNode(AST_Node_List* list, String_View name, AST_Node* expr) {
     AST_Node node;
     node.type = NODE_ASSIGNMENT;
     node.data.assignmentName = name;
@@ -849,28 +888,28 @@ inline size_t addAssignmentNode(AST_Node_List* list, String_View name, size_t ex
     return addNode(list, node);
 }
 
-inline size_t addIntNode(AST_Node_List* list, int value) {
+inline AST_Node* addIntNode(AST_Node_List* list, int value) {
     AST_Node node;
     node.type = NODE_INT;
     node.data.intValue = value;
     return addNode(list, node);
 }
 
-inline size_t addBoolNode(AST_Node_List* list, bool value) {
+inline AST_Node* addBoolNode(AST_Node_List* list, bool value) {
     AST_Node node;
     node.type = NODE_BOOL;
     node.data.boolValue = value;
     return addNode(list, node);
 }
 
-inline size_t addIdentNode(AST_Node_List* list, String_View name) {
+inline AST_Node* addIdentNode(AST_Node_List* list, String_View name) {
     AST_Node node;
     node.type = NODE_IDENT;
     node.data.identName = name;
     return addNode(list, node);
 }
 
-inline size_t addArgNode(AST_Node_List* list, String_View name, String_View type) {
+inline AST_Node* addArgNode(AST_Node_List* list, String_View name, String_View type) {
     AST_Node node;
     node.type = NODE_ARGS;
     node.data.argName = name;
@@ -878,21 +917,21 @@ inline size_t addArgNode(AST_Node_List* list, String_View name, String_View type
     return addNode(list, node);
 }
 
-inline size_t addReturnNode(AST_Node_List* list, size_t expr) {
+inline AST_Node* addReturnNode(AST_Node_List* list, AST_Node* expr) {
     AST_Node node;
     node.type = NODE_RETURN;
     node.data.returnExpr = expr;
     return addNode(list, node);
 }
 
-inline size_t addElseNode(AST_Node_List* list, size_t scope) {
+inline AST_Node* addElseNode(AST_Node_List* list, AST_Node* scope) {
     AST_Node node;
     node.type = NODE_ELSE;
     node.data.elseScope = scope;
     return addNode(list, node);
 }
 
-inline size_t addIfOrWhileNode(AST_Node_List* list, Node_Type type, size_t condition, size_t scope) {
+inline AST_Node* addControlNode(AST_Node_List* list, Node_Type type, AST_Node* condition, AST_Node* scope) {
     AST_Node node;
     node.type = type;
     node.data.controlCondition = condition;
@@ -900,7 +939,7 @@ inline size_t addIfOrWhileNode(AST_Node_List* list, Node_Type type, size_t condi
     return addNode(list, node);
 }
 
-inline size_t addBinaryOpNode(AST_Node_List* list, size_t left, Token token, size_t right) {
+inline AST_Node* addBinaryOpNode(AST_Node_List* list, AST_Node* left, Token token, AST_Node* right) {
     assert(isOperator(token.type));
     AST_Node node;
     switch (token.type) {
@@ -984,16 +1023,16 @@ void recoverByEatUpTo(Lexer* lexer, Token_Type wanted) {
     }
 }
 
-size_t parseTerm(AST_Node_List* list, Lexer* lexer);
-size_t parseBracketedExpr(AST_Node_List* list, Lexer* lexer);
-size_t parseExpr(AST_Node_List* list, Lexer* lexer, int precedence);
-size_t parseStatement(AST_Node_List* list, Lexer* lexer);
-size_t parseStatments(AST_Node_List* list, Lexer* lexer, bool* success);
-size_t parseScope(AST_Node_List* list, Lexer* lexer);
-size_t parseArgs(AST_Node_List* list, Lexer* lexer, bool* success);
-size_t parseFunction(AST_Node_List* list, Lexer* lexer);
+AST_Node* parseTerm(AST_Node_List* list, Lexer* lexer);
+AST_Node* parseBracketedExpr(AST_Node_List* list, Lexer* lexer);
+AST_Node* parseExpr(AST_Node_List* list, Lexer* lexer, int precedence);
+AST_Node* parseStatement(AST_Node_List* list, Lexer* lexer);
+AST_Node* parseStatments(AST_Node_List* list, Lexer* lexer, bool* success);
+AST_Node* parseScope(AST_Node_List* list, Lexer* lexer);
+AST_Node* parseArgs(AST_Node_List* list, Lexer* lexer, bool* success);
+AST_Node* parseFunction(AST_Node_List* list, Lexer* lexer);
 
-size_t parseTerm(AST_Node_List* list, Lexer* lexer) {
+AST_Node* parseTerm(AST_Node_List* list, Lexer* lexer) {
     Token token = getToken(lexer);
     switch (token.type) {
         case TOKEN_INT:
@@ -1009,50 +1048,50 @@ size_t parseTerm(AST_Node_List* list, Lexer* lexer) {
     return addIntNode(list, token.intValue);
 }
 
-size_t parseIncreasingPrecedence(AST_Node_List* list, Lexer* lexer, size_t left, int precedence) {
+AST_Node* parseIncreasingPrecedence(AST_Node_List* list, Lexer* lexer, AST_Node* left, int precedence) {
     Token token = peekToken(lexer);
     assert(isOperator(token.type));
 
     int thisPrecedence = getPrecedence(token.type);
     if (thisPrecedence > precedence) {
         getToken(lexer); // Eat the operator
-        size_t right = parseExpr(list, lexer, thisPrecedence);
-        if (right == SIZE_MAX) {
-            return SIZE_MAX;
+        AST_Node* right = parseExpr(list, lexer, thisPrecedence);
+        if (right == NULL) {
+            return NULL;
         }
         return addBinaryOpNode(list, left, token, right);
     }
     return left;
 }
 
-size_t parseExpr(AST_Node_List* list, Lexer* lexer, int precedence) {
+AST_Node* parseExpr(AST_Node_List* list, Lexer* lexer, int precedence) {
     Token peeked = peekToken(lexer);
     if (peeked.type == TOKEN_LPAREN) {
         getToken(lexer); // Eat the '('
-        size_t inner = parseExpr(list, lexer, -1);
-        if (inner == SIZE_MAX) {
-            return SIZE_MAX;
+        AST_Node* inner = parseExpr(list, lexer, -1);
+        if (inner == NULL) {
+            return NULL;
         }
 
         Token token = getToken(lexer);
         if (token.type != TOKEN_RPAREN) {
             printErrorMessage(lexer->fileName, scopeToken(token), "Expected \")\", but got \""SV_FMT"\"", SV_ARG(token.text));
             recoverByEatUpTo(lexer, TOKEN_SEMICOLON);
-            return SIZE_MAX;
+            return NULL;
         }
         return inner;
     }
 
-    size_t term = parseTerm(list, lexer);
-    if (term == SIZE_MAX) {
-        return SIZE_MAX;
+    AST_Node* term = parseTerm(list, lexer);
+    if (term == NULL) {
+        return NULL;
     }
 
     peeked = peekToken(lexer);
     while (isOperator(peeked.type)) {
-        size_t op = parseIncreasingPrecedence(list, lexer, term, precedence);
-        if (op == SIZE_MAX) {
-            return SIZE_MAX;
+        AST_Node* op = parseIncreasingPrecedence(list, lexer, term, precedence);
+        if (op == NULL) {
+            return NULL;
         }
         if (op == term) {
             return term;
@@ -1064,27 +1103,27 @@ size_t parseExpr(AST_Node_List* list, Lexer* lexer, int precedence) {
     if (peeked.type == TOKEN_INT || peeked.type == TOKEN_IDENT) {
         printErrorMessage(lexer->fileName, scopeToken(peeked), "Expected an operator, but got %d", peeked.intValue);
         recoverByEatUpTo(lexer, TOKEN_SEMICOLON);
-        return SIZE_MAX;
+        return NULL;
     }
    
     return term;
 }
 
-size_t parseStatement(AST_Node_List* list, Lexer* lexer) {
+AST_Node* parseStatement(AST_Node_List* list, Lexer* lexer) {
     Token token = peekToken(lexer);
     switch (token.type) {
         case TOKEN_RETURN_KEYWORD: {
             getToken(lexer); // Eat the "return"
-            size_t inner = parseExpr(list, lexer, -1);
-            if (inner == SIZE_MAX) {
+            AST_Node* inner = parseExpr(list, lexer, -1);
+            if (inner == NULL) {
                recoverByEatUntil(lexer, TOKEN_SEMICOLON);
-               return SIZE_MAX;
+               return NULL;
             }
-            size_t result = addReturnNode(list, inner);
+            AST_Node* result = addReturnNode(list, inner);
             token = getToken(lexer);
             if (token.type != TOKEN_SEMICOLON) {
                 printErrorMessage(lexer->fileName, scopeAfter(token), "Expected a \";\", but got none");
-                return SIZE_MAX;
+                return NULL;
             }
             return result;
         }
@@ -1101,26 +1140,26 @@ size_t parseStatement(AST_Node_List* list, Lexer* lexer) {
                     if (!isTypeToken(token.type)) {
                         printErrorMessage(lexer->fileName, scopeToken(token), "Expected a type name, but got \""SV_FMT"\"", SV_ARG(token.text));
                         recoverByEatUntil(lexer, TOKEN_SEMICOLON);
-                        return SIZE_MAX;
+                        return NULL;
                     }
                     String_View type = token.text;
                     token = getToken(lexer);
                     if (token.type != TOKEN_SEMICOLON) {
                         printErrorMessage(lexer->fileName, scopeAfter(token), "Expected a \";\", but got none");
-                        return SIZE_MAX;
+                        return NULL;
                     }
                     return addDeclarationNode(list, name, type);
                 }
                 case TOKEN_EQUALS: {
-                    size_t expr = parseExpr(list, lexer, -1);
-                    if (expr == SIZE_MAX) {
+                    AST_Node* expr = parseExpr(list, lexer, -1);
+                    if (expr == NULL) {
                         recoverByEatUntil(lexer, TOKEN_SEMICOLON);
-                        return SIZE_MAX;
+                        return NULL;
                     }
                     token = getToken(lexer);
                     if (token.type != TOKEN_SEMICOLON) {
                         printErrorMessage(lexer->fileName, scopeAfter(token), "Expected a \";\", but got none");
-                        return SIZE_MAX;
+                        return NULL;
                     }
                     return addAssignmentNode(list, name, expr);
                 }
@@ -1135,78 +1174,78 @@ size_t parseStatement(AST_Node_List* list, Lexer* lexer) {
         case TOKEN_IF_KEYWORD: {
             getToken(lexer); // Eat the "if"
             //TODO: Error recovery from parseExpr will eat until a semicolon, but that's not great here.
-            size_t condition = parseExpr(list, lexer, -1);
-            if (condition == SIZE_MAX) {
+            AST_Node* condition = parseExpr(list, lexer, -1);
+            if (condition == NULL) {
                 recoverByEatUntil(lexer, TOKEN_RBRACE);
-                return SIZE_MAX;
+                return NULL;
             }
-            size_t scope = parseScope(list, lexer);
-            if (scope == SIZE_MAX) {
-                return SIZE_MAX;
+            AST_Node* scope = parseScope(list, lexer);
+            if (scope == NULL) {
+                return NULL;
             }
-            return addIfOrWhileNode(list, NODE_IF, condition, scope);
+            return addControlNode(list, NODE_IF, condition, scope);
         }
         case TOKEN_ELSE_KEYWORD: {
             getToken(lexer); // Eat the "else"
-            size_t scope = parseScope(list, lexer);
-            if (scope == SIZE_MAX) {
-                return SIZE_MAX;
+            AST_Node* scope = parseScope(list, lexer);
+            if (scope == NULL) {
+                return NULL;
             }
             return addElseNode(list, scope);
         }
         case TOKEN_WHILE_KEYWORD: {
             getToken(lexer); // Eat the "while"
-            size_t condition = parseExpr(list, lexer, -1);
-            if (condition == SIZE_MAX) {
+            AST_Node* condition = parseExpr(list, lexer, -1);
+            if (condition == NULL) {
                 recoverByEatUntil(lexer, TOKEN_RBRACE);
-                return SIZE_MAX;
+                return NULL;
             }
-            size_t scope = parseScope(list, lexer);
-            if (scope == SIZE_MAX) {
-                return SIZE_MAX;
+            AST_Node* scope = parseScope(list, lexer);
+            if (scope == NULL) {
+                return NULL;
             }
-            return addIfOrWhileNode(list, NODE_WHILE, condition, scope);
+            return addControlNode(list, NODE_WHILE, condition, scope);
             break;
         }
         default: {
             printErrorMessage(lexer->fileName, scopeToken(token), "Expected the start of a valid statement, got \""SV_FMT"\"", SV_ARG(token.text));
             recoverByEatUntil(lexer, TOKEN_SEMICOLON);
-            return SIZE_MAX;
+            return NULL;
        }
     }
 }
 
-size_t parseStatements(AST_Node_List* list, Lexer* lexer, bool* success) {
+AST_Node* parseStatements(AST_Node_List* list, Lexer* lexer, bool* success) {
     *success = true;
 
     if (peekToken(lexer).type == TOKEN_RBRACE) {
         getToken(lexer); // Eat the '}'
-        return SIZE_MAX;
+        return NULL;
     }
 
     AST_Node node;
     node.type = NODE_STATEMENTS;
     node.data.statementStatement = parseStatement(list, lexer);
-    if (node.data.statementStatement == SIZE_MAX) {
+    if (node.data.statementStatement == NULL) {
         *success = false;
     }
-    size_t head = addNode(list, node);
-    size_t curr = head;
+    AST_Node* head = addNode(list, node);
+    AST_Node* curr = head;
 
     while (peekToken(lexer).type != TOKEN_RBRACE) {
         node.data.statementStatement = parseStatement(list, lexer);
-        if (node.data.statementStatement == SIZE_MAX) {
+        if (node.data.statementStatement == NULL) {
             *success = false;
         }
-        list->nodes[curr].data.statementNext = addNode(list, node);
-        curr = list->nodes[curr].data.statementNext;
+        curr->data.statementNext = addNode(list, node);
+        curr = curr->data.statementNext;
     }
     getToken(lexer); // Eat the '}'
-    list->nodes[curr].data.statementNext = SIZE_MAX;
+    curr->data.statementNext = NULL;
     return head;
 }
 
-size_t parseScope(AST_Node_List* list, Lexer* lexer) {
+AST_Node* parseScope(AST_Node_List* list, Lexer* lexer) {
     Token token = getToken(lexer);
     assert(token.type == TOKEN_LBRACE);
 
@@ -1217,10 +1256,10 @@ size_t parseScope(AST_Node_List* list, Lexer* lexer) {
     bool success;
     node.data.scopeStatements = parseStatements(list, lexer, &success);
 
-    return success ? addNode(list, node) : SIZE_MAX;
+    return success ? addNode(list, node) : NULL;
 }
 
-size_t parseArgs(AST_Node_List* list, Lexer* lexer, bool* success) {
+AST_Node* parseArgs(AST_Node_List* list, Lexer* lexer, bool* success) {
     *success = true;
 
     Token token = getToken(lexer);
@@ -1228,7 +1267,7 @@ size_t parseArgs(AST_Node_List* list, Lexer* lexer, bool* success) {
 
     token = getToken(lexer);
     if (token.type == TOKEN_RPAREN) {
-        return SIZE_MAX;
+        return NULL;
     }
     if (token.type != TOKEN_IDENT) {
         printErrorMessage(lexer->fileName, scopeToken(token), "Expected an identifier in argument list, got \""SV_FMT"\"", SV_ARG(token.text));
@@ -1251,8 +1290,8 @@ size_t parseArgs(AST_Node_List* list, Lexer* lexer, bool* success) {
         *success = false;
     }
     String_View type = token.text;
-    size_t head = addArgNode(list, name, type);
-    size_t curr = head;
+    AST_Node* head = addArgNode(list, name, type);
+    AST_Node* curr = head;
 
     token = getToken(lexer);
     while (token.type != TOKEN_RPAREN) {
@@ -1285,16 +1324,16 @@ size_t parseArgs(AST_Node_List* list, Lexer* lexer, bool* success) {
         }
         type = token.text;
         
-        list->nodes[curr].data.argNext = addArgNode(list, name, type);
-        curr = list->nodes[curr].data.argNext;
+        curr->data.argNext = addArgNode(list, name, type);
+        curr = curr->data.argNext;
 
         token = getToken(lexer);
     }
-    list->nodes[curr].data.argNext = SIZE_MAX;
+    curr->data.argNext = NULL;
     return head;
 }
 
-size_t parseFunction(AST_Node_List* list, Lexer* lexer) {
+AST_Node* parseFunction(AST_Node_List* list, Lexer* lexer) {
     bool success = true;
     AST_Node node;
     node.type = NODE_FUNCTION;
@@ -1338,7 +1377,7 @@ size_t parseFunction(AST_Node_List* list, Lexer* lexer) {
     if (token.type == TOKEN_ARROW) {
         getToken(lexer); // Eat the "->"
         token = getToken(lexer);
-        if (token.type != TOKEN_INTTYPE_KEYWORD) {
+        if (!isTypeToken(token.type)) {
             printErrorMessage(lexer->fileName, scopeToken(token), "Expected a return type in function definition, got \""SV_FMT"\"", SV_ARG(token.text));
             recoverByEatUpTo(lexer, TOKEN_LBRACE);
             success = false;
@@ -1357,11 +1396,11 @@ size_t parseFunction(AST_Node_List* list, Lexer* lexer) {
     }
 
     node.data.functionBody = parseScope(list, lexer);
-    if (node.data.functionBody == SIZE_MAX) {
+    if (node.data.functionBody == NULL) {
         success = false;
     }
 
-    return success ? addNode(list, node) : SIZE_MAX;
+    return success ? addNode(list, node) : NULL;
 }
 
 void printIndented(int indent, char* fmt, ...) {
@@ -1374,159 +1413,158 @@ void printIndented(int indent, char* fmt, ...) {
     va_end(args);
 }
 
-void printASTIndented(int indent, AST_Node_List list, size_t root) {
-    AST_Node node = list.nodes[root];
-    switch (node.type) {
+void printASTIndented(int indent, AST_Node* root) {
+    switch (root->type) {
         case NODE_FUNCTION: {
-            printIndented(indent, "type=FUNCTION, name="SV_FMT", rettype="SV_FMT", args=", SV_ARG(node.data.functionName), SV_ARG(node.data.functionRetType));
-            if (node.data.functionArgs == SIZE_MAX) {
+            printIndented(indent, "type=FUNCTION, name="SV_FMT", rettype="SV_FMT", args=", SV_ARG(root->data.functionName), SV_ARG(root->data.functionRetType));
+            if (root->data.functionArgs == NULL) {
                 printf("NONE, body=");
             }
             else {
                 printf("(\n");
-                printASTIndented(indent + 1, list, node.data.functionArgs);
+                printASTIndented(indent + 1, root->data.functionArgs);
                 printIndented(indent, "), body=");
             }
-            if (node.data.functionBody == SIZE_MAX) {
+            if (root->data.functionBody == NULL) {
                 printf("NONE\n");
             }
             else {
                 printf("(\n");
-                printASTIndented(indent + 1, list, node.data.functionBody);
+                printASTIndented(indent + 1, root->data.functionBody);
                 printIndented(indent, ")\n");
             }
             break;
         }
         case NODE_ARGS: {
-            printIndented(indent, "name="SV_FMT", type="SV_FMT"\n", SV_ARG(node.data.argName), SV_ARG(node.data.argType));
-            while (node.data.argNext != SIZE_MAX) {
-                node = list.nodes[node.data.argNext];
-                printIndented(indent, "name="SV_FMT", type="SV_FMT"\n", SV_ARG(node.data.argName), SV_ARG(node.data.argType));
+            printIndented(indent, "name="SV_FMT", type="SV_FMT"\n", SV_ARG(root->data.argName), SV_ARG(root->data.argType));
+            while (root->data.argNext != NULL) {
+                root = root->data.argNext;
+                printIndented(indent, "name="SV_FMT", type="SV_FMT"\n", SV_ARG(root->data.argName), SV_ARG(root->data.argType));
             }
             break;
         }
         case NODE_SCOPE: {
             printIndented(indent, "type=SCOPE, statements=");
-            if (node.data.scopeStatements == SIZE_MAX) {
+            if (root->data.scopeStatements == NULL) {
                 printf("NONE\n");
             }
             else {
                 printf("(\n");
-                printASTIndented(indent + 1, list, node.data.scopeStatements);
+                printASTIndented(indent + 1, root->data.scopeStatements);
                 printIndented(indent, ")\n");
             }
             break;
         }
         case NODE_STATEMENTS: {
-            printASTIndented(indent, list, node.data.statementStatement);
-            while (node.data.statementNext != SIZE_MAX) {
-                node = list.nodes[node.data.statementNext];
-                printASTIndented(indent, list, node.data.statementStatement);
+            printASTIndented(indent, root->data.statementStatement);
+            while (root->data.statementNext != NULL) {
+                root = root->data.statementNext;
+                printASTIndented(indent, root->data.statementStatement);
             }
             break;
         }
         case NODE_RETURN: {
             printIndented(indent, "type=RETURN, expr=");
-            if (node.data.returnExpr == SIZE_MAX) {
+            if (root->data.returnExpr == NULL) {
                 printf("NONE\n");
             }
             else {
                 printf("(\n");
-                printASTIndented(indent + 1, list, node.data.returnExpr);
+                printASTIndented(indent + 1, root->data.returnExpr);
                 printIndented(indent, ")\n");
             }
             break;
         }
         case NODE_DECLARATION: {
-            printIndented(indent, "type=DECLARATION, name="SV_FMT", type="SV_FMT"\n", SV_ARG(node.data.declarationName), SV_ARG(node.data.declarationType));
+            printIndented(indent, "type=DECLARATION, name="SV_FMT", type="SV_FMT"\n", SV_ARG(root->data.declarationName), SV_ARG(root->data.declarationType));
             break;
         }
         case NODE_ASSIGNMENT: {
-            printIndented(indent, "type=ASSIGNMENT, name="SV_FMT", expr=(\n", SV_ARG(node.data.declarationName));
-            printASTIndented(indent + 1, list, node.data.assignmentExpr);
+            printIndented(indent, "type=ASSIGNMENT, name="SV_FMT", expr=(\n", SV_ARG(root->data.declarationName));
+            printASTIndented(indent + 1, root->data.assignmentExpr);
             printIndented(indent, ")\n");
             break;
         }
         case NODE_PLUS: {
             printIndented(indent, "type=PLUS, left=(\n");
-            printASTIndented(indent + 1, list, node.data.binaryOpLeft);
+            printASTIndented(indent + 1, root->data.binaryOpLeft);
             printIndented(indent, "), right=(\n");
-            printASTIndented(indent + 1, list, node.data.binaryOpRight);
+            printASTIndented(indent + 1, root->data.binaryOpRight);
             printIndented(indent, ")\n");
             break;
         }
         case NODE_MINUS: {
             printIndented(indent, "type=MINUS, left=(\n");
-            printASTIndented(indent + 1, list, node.data.binaryOpLeft);
+            printASTIndented(indent + 1, root->data.binaryOpLeft);
             printIndented(indent, "), right=(\n");
-            printASTIndented(indent + 1, list, node.data.binaryOpRight);
+            printASTIndented(indent + 1, root->data.binaryOpRight);
             printIndented(indent, ")\n");
             break;
         }
         case NODE_TIMES: {
             printIndented(indent, "type=TIMES, left=(\n");
-            printASTIndented(indent + 1, list, node.data.binaryOpLeft);
+            printASTIndented(indent + 1, root->data.binaryOpLeft);
             printIndented(indent, "), right=(\n");
-            printASTIndented(indent + 1, list, node.data.binaryOpRight);
+            printASTIndented(indent + 1, root->data.binaryOpRight);
             printIndented(indent, ")\n");
             break;
         }
         case NODE_DIVIDE: {
             printIndented(indent, "type=DIVIDE, left=(\n");
-            printASTIndented(indent + 1, list, node.data.binaryOpLeft);
+            printASTIndented(indent + 1, root->data.binaryOpLeft);
             printIndented(indent, "), right=(\n");
-            printASTIndented(indent + 1, list, node.data.binaryOpRight);
+            printASTIndented(indent + 1, root->data.binaryOpRight);
             printIndented(indent, ")\n");
             break;
         }
         case NODE_IS_EQUAL: {
             printIndented(indent, "type=IS_EQUAL, left=(\n");
-            printASTIndented(indent + 1, list, node.data.binaryOpLeft);
+            printASTIndented(indent + 1, root->data.binaryOpLeft);
             printIndented(indent, "), right=(\n");
-            printASTIndented(indent + 1, list, node.data.binaryOpRight);
+            printASTIndented(indent + 1, root->data.binaryOpRight);
             printIndented(indent, ")\n");
             break;
         }
         case NODE_IF: {
             printIndented(indent, "type=IF, condition=(\n");
-            printASTIndented(indent + 1, list, node.data.controlCondition);
+            printASTIndented(indent + 1, root->data.controlCondition);
             printIndented(indent, "), body=(\n");
-            printASTIndented(indent + 1, list, node.data.controlScope);
+            printASTIndented(indent + 1, root->data.controlScope);
             printIndented(indent, ")\n");
             break;
         }
         case NODE_ELSE: {
             printIndented(indent, "type=ELSE, body=(\n");
-            printASTIndented(indent + 1, list, node.data.elseScope);
+            printASTIndented(indent + 1, root->data.elseScope);
             printIndented(indent, ")\n");
             break;
         }
         case NODE_WHILE: {
             printIndented(indent, "type=WHILE, condition=(\n");
-            printASTIndented(indent + 1, list, node.data.controlCondition);
+            printASTIndented(indent + 1, root->data.controlCondition);
             printIndented(indent, "), body=(\n");
-            printASTIndented(indent + 1, list, node.data.controlScope);
+            printASTIndented(indent + 1, root->data.controlScope);
             printIndented(indent, ")\n");
             break;
         }
         case NODE_INT: {
-            printIndented(indent, "type=INT, value=%d\n", node.data.intValue);
+            printIndented(indent, "type=INT, value=%d\n", root->data.intValue);
             break;
         }
         case NODE_BOOL: {
-            printIndented(indent, "type=BOOL, value=%d\n", node.data.boolValue);
+            printIndented(indent, "type=BOOL, value=%d\n", root->data.boolValue);
             break;
         }
         case NODE_IDENT: {
-            printIndented(indent, "type=IDENT, name="SV_FMT"\n", SV_ARG(node.data.identName));
+            printIndented(indent, "type=IDENT, name="SV_FMT"\n", SV_ARG(root->data.identName));
             break;
         }
     }
     static_assert(NODE_COUNT == 18, "Non-exhaustive cases (printASTIndented)");
 }
 
-inline void printAST(AST_Node_List list, size_t root) {
-    printASTIndented(0, list, root);
+inline void printAST(AST_Node* root) {
+    printASTIndented(0, root);
 }
 
 
@@ -1603,67 +1641,63 @@ void addScopeParent(Symbol_Table* table, int id, int parentId) {
     table->scopeParents[table->parentsLength++] = (Scope_Parent_Entry){id, parentId};
 }
 
-void addScopeData(Symbol_Table* table, AST_Node_List list, size_t root, int parentId) {
-    AST_Node scope = list.nodes[root];
-    assert(scope.type == NODE_SCOPE);
+void addScopeData(Symbol_Table* table, AST_Node* root, int parentId) {
+    assert(root->type == NODE_SCOPE);
 
-    size_t statementsI = scope.data.scopeStatements;
-    // If the scope is empty, there's no data to add.
-    if (statementsI == SIZE_MAX) {
+    AST_Node* statements = root->data.scopeStatements;
+    // If the root is empty, there's no data to add.
+    if (statements == NULL) {
         return;
     }
 
-    addScopeParent(table, scope.data.scopeId, parentId);
-    while (statementsI != SIZE_MAX) {
-        AST_Node statements = list.nodes[statementsI];
-        AST_Node statement = list.nodes[statements.data.statementStatement];
+    addScopeParent(table, root->data.scopeId, parentId);
+    while (statements != NULL) {
+        AST_Node* statement = statements->data.statementStatement;
 
-        switch (statement.type) {
+        switch (statement->type) {
             case NODE_DECLARATION: {
-                addSymbol(table, scope.data.scopeId, statement.data.declarationName, statement.data.declarationType);
+                addSymbol(table, root->data.scopeId, statement->data.declarationName, statement->data.declarationType);
                 break;
             }
             case NODE_SCOPE: {
-                addScopeData(table, list, statements.data.statementStatement, scope.data.scopeId);
+                addScopeData(table, statements->data.statementStatement, root->data.scopeId);
                 break;
             }
             case NODE_IF:
             case NODE_WHILE: {
-                addScopeData(table, list, statement.data.controlScope, scope.data.scopeId);
+                addScopeData(table, statement->data.controlScope, root->data.scopeId);
                 break;
             }
             case NODE_ELSE: {
-                addScopeData(table, list, statement.data.elseScope, scope.data.scopeId);
+                addScopeData(table, statement->data.elseScope, root->data.scopeId);
                 break;
             }
         }
-        statementsI = statements.data.statementNext;
+        statements = statements->data.statementNext;
     }
 }
 
-void addFunctionData(Symbol_Table* table, AST_Node_List list, size_t root, int parentId) {
-    AST_Node function = list.nodes[root];
-    assert(function.type == NODE_FUNCTION);
+void addFunctionData(Symbol_Table* table, AST_Node* root, int parentId) {
+    assert(root->type == NODE_FUNCTION);
 
-    AST_Node body = list.nodes[function.data.functionBody];
+    AST_Node* body = root->data.functionBody;
     // If the body of the function is empty, then we don't need to add any of the heirarchy data or argument symbols.
-    if (body.data.scopeStatements == SIZE_MAX) {
+    if (body->data.scopeStatements == NULL) {
         return;
     }
 
-    size_t args = function.data.functionArgs;
-    while (args != SIZE_MAX) {
-        AST_Node arg = list.nodes[args];
-        addSymbol(table, body.data.scopeId, arg.data.argName, arg.data.argType);
-        args = arg.data.argNext;
+    AST_Node* arg = root->data.functionArgs;
+    while (arg != NULL) {
+        addSymbol(table, body->data.scopeId, arg->data.argName, arg->data.argType);
+        arg = arg->data.argNext;
     }
 
-    addScopeData(table, list, function.data.functionBody, parentId);
+    addScopeData(table, root->data.functionBody, parentId);
 }
 
-void initSymbolTable(Symbol_Table* table, AST_Node_List list, size_t root) {
+void initSymbolTable(Symbol_Table* table, AST_Node* root) {
     //Temporary: When we do full programs, this will be different.
-    addFunctionData(table, list, root, -1);
+    addFunctionData(table, root, -1);
 }
 
 Scope_Parent_Entry tableLookupParent(Symbol_Table* table, int scopeId) {
@@ -1700,61 +1734,58 @@ Symbol_Lookup_Result tableLookupSymbol(Symbol_Table* table, int scopeId, String_
 // Verification API //
 //////////////////////
 
-bool verifyFunction(Symbol_Table* table, AST_Node_List list, size_t root);
-bool verifyScope(Symbol_Table* table, AST_Node_List list, size_t root);
-bool verifyExpr(Symbol_Table* table, AST_Node_List list, size_t root, int scopeId);
+bool verifyFunction(Symbol_Table* table, AST_Node* root);
+bool verifyScope(Symbol_Table* table, AST_Node* root);
+bool verifyExpr(Symbol_Table* table, AST_Node* root, int scopeId);
 
-bool verifyFunction(Symbol_Table* table, AST_Node_List list, size_t root) {
-    AST_Node function = list.nodes[root];
-    assert(function.type == NODE_FUNCTION);
+bool verifyFunction(Symbol_Table* table, AST_Node* root) {
+    assert(root->type == NODE_FUNCTION);
 
-    return verifyScope(table, list, function.data.functionBody);
+    return verifyScope(table, root->data.functionBody);
 }
 
-bool verifyScope(Symbol_Table* table, AST_Node_List list, size_t root) {
+bool verifyScope(Symbol_Table* table, AST_Node* root) {
     bool success = true;
 
-    AST_Node scope = list.nodes[root];
-    assert(scope.type == NODE_SCOPE);
+    assert(root->type == NODE_SCOPE);
 
-    size_t statementsI = scope.data.scopeStatements;
-    while (statementsI != SIZE_MAX) {
-        AST_Node statements = list.nodes[statementsI];
-        AST_Node statement = list.nodes[statements.data.statementStatement];
+    AST_Node* statements = root->data.scopeStatements;
+    while (statements != NULL) {
+        AST_Node* statement = statements->data.statementStatement;
 
-        switch (statement.type) {
+        switch (statement->type) {
             case NODE_RETURN: {
-                if (!verifyExpr(table, list, statement.data.returnExpr, scope.data.scopeId)) {
+                if (!verifyExpr(table, statement->data.returnExpr, root->data.scopeId)) {
                     success = false;
                 }
                 break;
             }
             case NODE_ASSIGNMENT: {
-                Symbol_Lookup_Result result = tableLookupSymbol(table, scope.data.scopeId, statement.data.assignmentName);
+                Symbol_Lookup_Result result = tableLookupSymbol(table, root->data.scopeId, statement->data.assignmentName);
                 if (!result.exists) {
-                    fprintf(stderr, "ERROR! Use of undeclared identifier \""SV_FMT"\"\n", SV_ARG(statement.data.assignmentName));
+                    fprintf(stderr, "ERROR! Use of undeclared identifier \""SV_FMT"\"\n", SV_ARG(statement->data.assignmentName));
                     success = false;
                 }
                 break;
             }
             case NODE_SCOPE: {
-                if (!verifyScope(table, list, statements.data.statementStatement)) {
+                if (!verifyScope(table, statements->data.statementStatement)) {
                     success = false;
                 }
                 break;
             }
             case NODE_IF:
             case NODE_WHILE: {
-                if (!verifyExpr(table, list, statement.data.controlCondition, scope.data.scopeId)) {
+                if (!verifyExpr(table, statement->data.controlCondition, root->data.scopeId)) {
                     success = false;
                 }
-                if (!verifyScope(table, list, statement.data.controlScope)) {
+                if (!verifyScope(table, statement->data.controlScope)) {
                     success = false;
                 }
                 break;
             }
             case NODE_ELSE: {
-                if (!verifyScope(table, list, statement.data.elseScope)) {
+                if (!verifyScope(table, statement->data.elseScope)) {
                     success = false;
                 }
                 break;
@@ -1763,29 +1794,27 @@ bool verifyScope(Symbol_Table* table, AST_Node_List list, size_t root) {
                 break;
             }
             default:
-                printf("Unknown statement type: %d\n", statement.type);
+                printf("Unknown statement type: %d\n", statement->type);
                 assert(false && "Not a statement type or non-exhaustive cases (verifyScope)");
         }
 
-        statementsI = statements.data.statementNext;
+        statements = statements->data.statementNext;
     }
 
     return success;
 }
 
-bool verifyExpr(Symbol_Table* table, AST_Node_List list, size_t root, int scopeId) {
-    AST_Node expr = list.nodes[root];
-    
-    switch (expr.type) {
+bool verifyExpr(Symbol_Table* table, AST_Node* root, int scopeId) {
+    switch (root->type) {
         case NODE_INT:
         case NODE_BOOL: {
             return true;
         }
 
         case NODE_IDENT: {
-            Symbol_Lookup_Result result = tableLookupSymbol(table, scopeId, expr.data.identName);
+            Symbol_Lookup_Result result = tableLookupSymbol(table, scopeId, root->data.identName);
             if (!result.exists) {
-                fprintf(stderr, "ERROR! Variable \""SV_FMT"\" used before it was declared\n", SV_ARG(expr.data.identName));
+                fprintf(stderr, "ERROR! Variable \""SV_FMT"\" used before it was declared\n", SV_ARG(root->data.identName));
                 return false;
             }
             return true;
@@ -1796,14 +1825,17 @@ bool verifyExpr(Symbol_Table* table, AST_Node_List list, size_t root, int scopeI
         case NODE_TIMES:
         case NODE_DIVIDE:
         case NODE_IS_EQUAL: {
-            if (!verifyExpr(table, list, expr.data.binaryOpLeft, scopeId)) {
+            if (!verifyExpr(table, root->data.binaryOpLeft, scopeId)) {
                 return false;
             }
-            if (!verifyExpr(table, list, expr.data.binaryOpRight, scopeId)) {
+            if (!verifyExpr(table, root->data.binaryOpRight, scopeId)) {
                 return false;
             }
             return true;
         }
+        default:
+            printf("Unknown expression node: %d\n", root->type);
+            assert(false && "Not an expression type or non-exhaustive cases (verifyExpr)");
     }
 }
 
@@ -1814,31 +1846,28 @@ bool verifyExpr(Symbol_Table* table, AST_Node_List list, size_t root, int scopeI
 ///////////////////////
 
 //TODO: Using String_View for types seems inefficient and sloppy. This really should be an enum for primitive types and reworked to allow for user-defined types.
-bool typeCheckFunction(Symbol_Table* table, AST_Node_List list, size_t root);
-bool expectScopeType(Symbol_Table* table, AST_Node_List list, size_t root, String_View expected);
+bool typeCheckFunction(Symbol_Table* table, AST_Node* root);
+bool expectScopeType(Symbol_Table* table, AST_Node* root, String_View expected);
 
-String_View getExprType(Symbol_Table* table, AST_Node_List list, size_t root, int scopeId);
+String_View getExprType(Symbol_Table* table, AST_Node* root, int scopeId);
 
-bool typeCheckFunction(Symbol_Table* table, AST_Node_List list, size_t root) {
-    AST_Node function = list.nodes[root];
-    assert(function.type == NODE_FUNCTION);
+bool typeCheckFunction(Symbol_Table* table, AST_Node* root) {
+    assert(root->type == NODE_FUNCTION);
     
-    return expectScopeType(table, list, function.data.functionBody, function.data.functionRetType);
+    return expectScopeType(table, root->data.functionBody, root->data.functionRetType);
 }
 
-bool expectScopeType(Symbol_Table* table, AST_Node_List list, size_t root, String_View expected) {
+bool expectScopeType(Symbol_Table* table, AST_Node* root, String_View expected) {
     bool success = true;
-    AST_Node scope = list.nodes[root];
-    assert(scope.type == NODE_SCOPE);
+    assert(root->type == NODE_SCOPE);
 
-    size_t statementsI = scope.data.scopeStatements;
-    while (statementsI != SIZE_MAX) {
-        AST_Node statements = list.nodes[statementsI];
-        AST_Node statement = list.nodes[statements.data.statementStatement];
+    AST_Node* statements = root->data.scopeStatements;
+    while (statements != NULL) {
+        AST_Node* statement = statements->data.statementStatement;
 
-        switch (statement.type) {
+        switch (statement->type) {
             case NODE_RETURN: {
-                String_View exprType = getExprType(table, list, statement.data.returnExpr, scope.data.scopeId);
+                String_View exprType = getExprType(table, statement->data.returnExpr, root->data.scopeId);
                 if (svIsEmpty(exprType)) {
                     fprintf(stderr, "ERROR! Could not evaluate type of return expression.\n");
                     success = false;
@@ -1850,10 +1879,10 @@ bool expectScopeType(Symbol_Table* table, AST_Node_List list, size_t root, Strin
                 break;
             }
             case NODE_ASSIGNMENT: {
-                Symbol_Lookup_Result var = tableLookupSymbol(table, scope.data.scopeId, statement.data.assignmentName);
+                Symbol_Lookup_Result var = tableLookupSymbol(table, root->data.scopeId, statement->data.assignmentName);
                 assert(var.exists);
                 String_View varType = var.entry.type;
-                String_View exprType = getExprType(table, list, statement.data.assignmentExpr, scope.data.scopeId);
+                String_View exprType = getExprType(table, statement->data.assignmentExpr, root->data.scopeId);
                 if (svIsEmpty(exprType)) {
                     //TODO: IMPROVE THIS ERROR MESSAGE!!!!! Lexical scoping of AST_Nodes
                     fprintf(stderr, "ERROR! Could not evalutate the right hand side of assignment\n");
@@ -1867,7 +1896,7 @@ bool expectScopeType(Symbol_Table* table, AST_Node_List list, size_t root, Strin
             }
             case NODE_IF:
             case NODE_WHILE: {
-                String_View conditionType = getExprType(table, list, statement.data.controlCondition, scope.data.scopeId);
+                String_View conditionType = getExprType(table, statement->data.controlCondition, root->data.scopeId);
                 if (svIsEmpty(conditionType)) {
                     fprintf(stderr, "ERROR! Could not evaluate type of control condition\n");
                     success = false;
@@ -1877,31 +1906,30 @@ bool expectScopeType(Symbol_Table* table, AST_Node_List list, size_t root, Strin
                     success = false;
                 }
 
-                expectScopeType(table, list, statement.data.controlScope, svFromCStr("unit"));
+                expectScopeType(table, statement->data.controlScope, svFromCStr("unit"));
                 break;
             }
             case NODE_ELSE: {
-                if (!expectScopeType(table, list, statement.data.elseScope, svFromCStr("unit"))) {
+                if (!expectScopeType(table, statement->data.elseScope, svFromCStr("unit"))) {
                     success = false;
                 }
                 break;
             }
             case NODE_SCOPE: {
-                if (!expectScopeType(table, list, statements.data.statementStatement, svFromCStr("unit"))) {
+                if (!expectScopeType(table, statements->data.statementStatement, svFromCStr("unit"))) {
                     success = false;
                 }
                 break;
             }
         }
 
-        statementsI = statements.data.statementNext;
+        statements = statements->data.statementNext;
     }
     return success;
 }
 
-String_View getExprType(Symbol_Table* table, AST_Node_List list, size_t root, int scopeId) {
-    AST_Node expr = list.nodes[root];
-    switch (expr.type) {
+String_View getExprType(Symbol_Table* table, AST_Node* root, int scopeId) {
+    switch (root->type) {
         case NODE_INT: {
             return svFromCStr("int");
         }
@@ -1909,7 +1937,7 @@ String_View getExprType(Symbol_Table* table, AST_Node_List list, size_t root, in
             return svFromCStr("bool");
         }
         case NODE_IDENT: {
-            Symbol_Lookup_Result result = tableLookupSymbol(table, scopeId, expr.data.identName);
+            Symbol_Lookup_Result result = tableLookupSymbol(table, scopeId, root->data.identName);
             assert(result.exists);
             return result.entry.type;
         }
@@ -1917,8 +1945,8 @@ String_View getExprType(Symbol_Table* table, AST_Node_List list, size_t root, in
         case NODE_MINUS:
         case NODE_TIMES:
         case NODE_DIVIDE: {
-            String_View left = getExprType(table, list, expr.data.binaryOpLeft, scopeId);
-            String_View right = getExprType(table, list, expr.data.binaryOpRight, scopeId);
+            String_View left = getExprType(table, root->data.binaryOpLeft, scopeId);
+            String_View right = getExprType(table, root->data.binaryOpRight, scopeId);
             if (svIsEmpty(left) || svIsEmpty(right)) {
                 fprintf(stderr, "ERROR! Could not evaluate expression type\n");
                 return svFromCStr("");
@@ -1930,8 +1958,8 @@ String_View getExprType(Symbol_Table* table, AST_Node_List list, size_t root, in
             return left;
         }
         case NODE_IS_EQUAL: {
-            String_View left = getExprType(table, list, expr.data.binaryOpLeft, scopeId);
-            String_View right = getExprType(table, list, expr.data.binaryOpRight, scopeId);
+            String_View left = getExprType(table, root->data.binaryOpLeft, scopeId);
+            String_View right = getExprType(table, root->data.binaryOpRight, scopeId);
             if (svIsEmpty(left) || svIsEmpty(right)) {
                 fprintf(stderr, "ERROR! Could not evaluate expression type\n");
                 return svFromCStr("");
@@ -1942,6 +1970,9 @@ String_View getExprType(Symbol_Table* table, AST_Node_List list, size_t root, in
             }
             return svFromCStr("bool");
         }
+        default:
+            printf("Unknown expression node: %d\n", root->type);
+            assert(false && "Not an expression type or non-exhaustive cases (getExprType)");
     }
 }
 
@@ -1951,72 +1982,70 @@ String_View getExprType(Symbol_Table* table, AST_Node_List list, size_t root, in
 // Emitter API //
 /////////////////
 
-void emitTerm(FILE* file, AST_Node_List list, size_t root);
-void emitExpr(FILE* file, AST_Node_List list, size_t root, int precedence);
-void emitStatement(int indent, FILE* file, AST_Node_List list, size_t root);
-void emitStatements(int indent, FILE* file, AST_Node_List list, size_t root);
-void emitScope(int leadingIndent, int indent, FILE* file, AST_Node_List list, size_t root);
-void emitArgs(FILE* file, AST_Node_List list, size_t root);
-void emitFunction(FILE* file, AST_Node_List list, size_t root);
+void emitTerm(FILE* file, AST_Node* root);
+void emitExpr(FILE* file, AST_Node* root, int precedence);
+void emitStatement(int indent, FILE* file, AST_Node* root);
+void emitStatements(int indent, FILE* file, AST_Node* root);
+void emitScope(int leadingIndent, int indent, FILE* file, AST_Node* root);
+void emitArgs(FILE* file, AST_Node* root);
+void emitFunction(FILE* file, AST_Node* root);
 
-void emitTerm(FILE* file, AST_Node_List list, size_t root) {
-    AST_Node term = list.nodes[root];
-    switch (term.type) {
+void emitTerm(FILE* file, AST_Node* root) {
+    switch (root->type) {
         case NODE_INT: {
-            tryFPrintf(file, "%d", term.data.intValue);
+            tryFPrintf(file, "%d", root->data.intValue);
             break;
         }
         case NODE_BOOL: {
-            tryFPrintf(file, "%d", term.data.boolValue);
+            tryFPrintf(file, "%d", root->data.boolValue);
             break;
         }
         case NODE_IDENT: {
-            tryFPrintf(file, SV_FMT, SV_ARG(term.data.identName));
+            tryFPrintf(file, SV_FMT, SV_ARG(root->data.identName));
             break;
         }
         default:
-            printf("Unknown node term type: %d\n", term.type);
+            printf("Unknown node term type: %d\n", root->type);
             assert(false && "Called with a non-term node or non-exhaustive cases (emitTerm)");
     }
 }
 
-void emitExpr(FILE* file, AST_Node_List list, size_t root, int precedence) {
-    AST_Node expr = list.nodes[root];
-    if (isNodeOperator(expr.type)) {
-        int thisPrecedence = getNodePrecedence(expr.type);
+void emitExpr(FILE* file, AST_Node* root, int precedence) {
+    if (isNodeOperator(root->type)) {
+        int thisPrecedence = getNodePrecedence(root->type);
         if (thisPrecedence < precedence) {
             tryFPuts("(", file);
         }
 
-        switch (expr.type) {
+        switch (root->type) {
             case NODE_PLUS: {
-                emitExpr(file, list, expr.data.binaryOpLeft, thisPrecedence);
+                emitExpr(file, root->data.binaryOpLeft, thisPrecedence);
                 tryFPuts(" + ", file);
-                emitExpr(file, list, expr.data.binaryOpRight, thisPrecedence);
+                emitExpr(file, root->data.binaryOpRight, thisPrecedence);
                 break;
             }
             case NODE_MINUS: {
-                emitExpr(file, list, expr.data.binaryOpLeft, thisPrecedence);
+                emitExpr(file, root->data.binaryOpLeft, thisPrecedence);
                 tryFPuts(" - ", file);
-                emitExpr(file, list, expr.data.binaryOpRight, thisPrecedence);
+                emitExpr(file, root->data.binaryOpRight, thisPrecedence);
                 break;
             }
             case NODE_TIMES: {
-                emitExpr(file, list, expr.data.binaryOpLeft, thisPrecedence);
+                emitExpr(file, root->data.binaryOpLeft, thisPrecedence);
                 tryFPuts(" * ", file);
-                emitExpr(file, list, expr.data.binaryOpRight, thisPrecedence);
+                emitExpr(file, root->data.binaryOpRight, thisPrecedence);
                 break;
             }
             case NODE_DIVIDE: {
-                emitExpr(file, list, expr.data.binaryOpLeft, thisPrecedence);
+                emitExpr(file, root->data.binaryOpLeft, thisPrecedence);
                 tryFPuts(" / ", file);
-                emitExpr(file, list, expr.data.binaryOpRight, thisPrecedence);
+                emitExpr(file, root->data.binaryOpRight, thisPrecedence);
                 break;
             }
             case NODE_IS_EQUAL: {
-                emitExpr(file, list, expr.data.binaryOpLeft, thisPrecedence);
+                emitExpr(file, root->data.binaryOpLeft, thisPrecedence);
                 tryFPuts(" == ", file);
-                emitExpr(file, list, expr.data.binaryOpRight, thisPrecedence);
+                emitExpr(file, root->data.binaryOpRight, thisPrecedence);
                 break;
             }
         }
@@ -2027,117 +2056,111 @@ void emitExpr(FILE* file, AST_Node_List list, size_t root, int precedence) {
         }
     }
     else {
-        emitTerm(file, list, root);
+        emitTerm(file, root);
     }
 }
 
-void emitStatement(int indent, FILE* file, AST_Node_List list, size_t root) {
-    AST_Node statement = list.nodes[root];
-    switch (statement.type) {
+void emitStatement(int indent, FILE* file, AST_Node* root) {
+    switch (root->type) {
         case NODE_RETURN: {
             tryFPutsIndented(indent, "return ", file);
-            emitExpr(file, list, statement.data.returnExpr, -1);
+            emitExpr(file, root->data.returnExpr, -1);
             tryFPuts(";\n", file);
             break;
         }
         case NODE_DECLARATION: {
-            tryFPrintfIndented(indent, file, SV_FMT" "SV_FMT, SV_ARG(statement.data.declarationType), SV_ARG(statement.data.declarationName));
+            tryFPrintfIndented(indent, file, SV_FMT" "SV_FMT, SV_ARG(root->data.declarationType), SV_ARG(root->data.declarationName));
             tryFPuts(";\n", file);
             break;
         }
         case NODE_ASSIGNMENT: {
-            tryFPrintfIndented(indent, file, SV_FMT" = ", SV_ARG(statement.data.assignmentName));
-            emitExpr(file, list, statement.data.assignmentExpr, -1);
+            tryFPrintfIndented(indent, file, SV_FMT" = ", SV_ARG(root->data.assignmentName));
+            emitExpr(file, root->data.assignmentExpr, -1);
             tryFPuts(";\n", file);
             break;
         }
         case NODE_IF: {
             tryFPutsIndented(indent, "if (", file);
-            emitExpr(file, list, statement.data.controlCondition, -1);
+            emitExpr(file, root->data.controlCondition, -1);
             tryFPuts(") ", file);
-            emitScope(0, indent, file, list, statement.data.controlScope);
+            emitScope(0, indent, file, root->data.controlScope);
             break;
         }
         case NODE_ELSE: {
             tryFPutsIndented(indent, "else ", file);
-            emitScope(0, indent, file, list, statement.data.elseScope);
+            emitScope(0, indent, file, root->data.elseScope);
             break;
         }
         case NODE_WHILE: {
             tryFPutsIndented(indent, "while (", file);
-            emitExpr(file, list, statement.data.controlCondition, -1);
+            emitExpr(file, root->data.controlCondition, -1);
             tryFPuts(") ", file);
-            emitScope(0, indent, file, list, statement.data.controlScope);
+            emitScope(0, indent, file, root->data.controlScope);
             break;
         }
         case NODE_SCOPE: {
-            emitScope(indent, indent, file, list, root);
+            emitScope(indent, indent, file, root);
             break;
         }
         default:
-            printf("Unexpected node type: %d\n", statement.type);
+            printf("Unexpected node type: %d\n", root->type);
             assert(false && "Not a statement type or non-exhaustive cases (emitStatement)");
     }
 }
 
-void emitStatements(int indent, FILE* file, AST_Node_List list, size_t root) {
-    if (root == SIZE_MAX) {
+void emitStatements(int indent, FILE* file, AST_Node* root) {
+    if (root == NULL) {
         return;
     }
     do {
-        AST_Node statements = list.nodes[root];
-        assert(statements.type == NODE_STATEMENTS);
+        assert(root->type == NODE_STATEMENTS);
 
-        emitStatement(indent, file, list, statements.data.statementStatement);
+        emitStatement(indent, file, root->data.statementStatement);
 
-        root = statements.data.statementNext;
-    } while (root != SIZE_MAX);
+        root = root->data.statementNext;
+    } while (root != NULL);
 }
 
-void emitScope(int leadingIndent, int indent, FILE* file, AST_Node_List list, size_t root) {
-    AST_Node scope = list.nodes[root];
-    assert(scope.type == NODE_SCOPE);
+void emitScope(int leadingIndent, int indent, FILE* file, AST_Node* root) {
+    assert(root->type == NODE_SCOPE);
 
     tryFPutsIndented(leadingIndent, "{\n", file);
-    emitStatements(indent + 1, file, list, scope.data.scopeStatements);
+    emitStatements(indent + 1, file, root->data.scopeStatements);
     tryFPutsIndented(indent, "}\n", file);
 }
 
-void emitArgs(FILE* file, AST_Node_List list, size_t root) {
-    if (root == SIZE_MAX) {
+void emitArgs(FILE* file, AST_Node* root) {
+    if (root == NULL) {
         tryFPuts("()", file);
         return;
     }
 
     tryFPuts("(", file);
-    AST_Node arg = list.nodes[root];
-    tryFPrintf(file, SV_FMT" "SV_FMT, SV_ARG(arg.data.argType), SV_ARG(arg.data.argName));
-    root = arg.data.argNext;
-    while (root != SIZE_MAX) {
-        arg = list.nodes[root];
-        tryFPrintf(file, ", "SV_FMT" "SV_FMT, SV_ARG(arg.data.argType), SV_ARG(arg.data.argName));
-        root = arg.data.argNext;
+    tryFPrintf(file, SV_FMT" "SV_FMT, SV_ARG(root->data.argType), SV_ARG(root->data.argName));
+    root = root->data.argNext;
+    while (root != NULL) {
+        tryFPrintf(file, ", "SV_FMT" "SV_FMT, SV_ARG(root->data.argType), SV_ARG(root->data.argName));
+        root = root->data.argNext;
     }
     tryFPuts(")", file);
 }
 
-void emitFunction(FILE* file, AST_Node_List list, size_t root) {
-    AST_Node function = list.nodes[root];
-    assert(function.type == NODE_FUNCTION);
+void emitFunction(FILE* file, AST_Node* root) {
+    assert(root->type == NODE_FUNCTION);
 
-    if (svEqualsCStr(function.data.functionName, "main")) {
+    if (svEqualsCStr(root->data.functionName, "main")) {
         tryFPuts("int ", file);
     }
-    else if (svEqualsCStr(function.data.functionRetType, "unit")) {
+    else if (svEqualsCStr(root->data.functionRetType, "unit")) {
         tryFPuts("void ", file);
     }
     else {
-        tryFPrintf(file, SV_FMT" ", SV_ARG(function.data.functionRetType));
+        tryFPrintf(file, SV_FMT" ", SV_ARG(root->data.functionRetType));
     }
-    tryFPrintf(file, SV_FMT, SV_ARG(function.data.functionName));
-    emitArgs(file, list, function.data.functionArgs);
+    tryFPrintf(file, SV_FMT, SV_ARG(root->data.functionName));
+    emitArgs(file, root->data.functionArgs);
     tryFPuts(" ", file);
-    emitScope(0, 0, file, list, function.data.functionBody);
+    emitScope(0, 0, file, root->data.functionBody);
 }
 
 // Read in file simple.lcl - DONE
@@ -2151,30 +2174,30 @@ int main() {
     char* fileName = "examples/simple.lcl";
     char* code = readEntireFile(fileName);
     Lexer lexer = makeLexer(code, fileName);
-    AST_Node_List list = makeNodeList(8);
-    size_t function = parseFunction(&list, &lexer);
-    if (function == SIZE_MAX) {
+    AST_Node_List list = makeNodeList(512);
+    AST_Node* function = parseFunction(&list, &lexer);
+    if (function == NULL) {
         return 1;
     }
-    printAST(list, function);
+    printAST(function);
     Symbol_Table table = makeSymbolTable(8);
-    initSymbolTable(&table, list, function);
+    initSymbolTable(&table, function);
 
     printf("\n\n\n");
     printSymbolTable(table);
     printf("\n\n\n");
 
-    bool verified = verifyFunction(&table, list, function);
+    bool verified = verifyFunction(&table, function);
     if (!verified) {
         return 1;
     }
 
-    bool typeChecked = typeCheckFunction(&table, list, function);
+    bool typeChecked = typeCheckFunction(&table, function);
     if (!typeChecked) {
         return 1;
     }
 
     FILE* output = tryFOpen("examples/simple.c", "wb");
-    emitFunction(output, list, function);
+    emitFunction(output, function);
     return 0;
 }

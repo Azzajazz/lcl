@@ -1,4 +1,5 @@
 main :: func() {
+    a: int;
     a = 1;
     if a == 1 {
         b: int;
@@ -9,5 +10,6 @@ main :: func() {
     }
     else {
         c: bool;
+        a = 2;
     }
 }
