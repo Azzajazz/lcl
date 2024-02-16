@@ -792,10 +792,46 @@ typedef union {
     bool boolValue;          // NODE_BOOL
 } Node_Data;
 
-typedef struct AST_Node {
+struct AST_Node {
     Node_Type type;
     Node_Data data;
-} AST_Node;
+};
+
+#define INIT_PROGRAM_CAPACITY 128
+typedef struct {
+    AST_Node** nodes;
+    int length;
+    int capacity;
+} Program;
+
+Program makeProgram() {
+    return (Program){
+        .nodes = NULL,
+        .length = 0,
+        .capacity = 0,
+    };
+}
+
+void printAST(AST_Node* node); // Forward declaration, since this is needed for `printProgram`
+
+void printProgram(Program program) {
+    for (int i = 0; i < program.length; ++i) {
+        printAST(program.nodes[i]);
+        printf("\n");
+    }
+}
+
+void programAddNode(Program* program, AST_Node* node) {
+    if (program->nodes == NULL) {
+        program->capacity = INIT_PROGRAM_CAPACITY;
+        program->nodes = malloc(program->capacity * sizeof(AST_Node*));
+    }
+    else if (program->length == program->capacity) {
+        program->capacity *= 2;
+        program->nodes = realloc(program->nodes, program->capacity * sizeof(AST_Node*));
+    }
+    program->nodes[program->length++] = node;
+}
 
 int getScopeId() {
     static int id = 0;
@@ -826,13 +862,6 @@ typedef struct {
     int bucketCapacity;        // The capacity of a single bucket
 } AST_Node_List;
 
-/*
-typedef struct {
-    AST_Node* nodes;
-    size_t nodeCount;
-    size_t capacity;
-} AST_Node_List;
-*/
 
 inline AST_Node_List makeNodeList(int bucketCapacity) {
     return (AST_Node_List){
@@ -843,7 +872,7 @@ inline AST_Node_List makeNodeList(int bucketCapacity) {
     };
 }
 
-inline AST_Node* addNode(AST_Node_List* list, AST_Node node) {
+inline AST_Node* nodeListAddNode(AST_Node_List* list, AST_Node node) {
     if (list->capacity == 0) {
         assert(list->length == 0);
         list->capacity = INIT_LIST_CAPACITY;
@@ -877,7 +906,7 @@ inline AST_Node* addDeclarationNode(AST_Node_List* list, String_View name, Strin
     node.type = NODE_DECLARATION;
     node.data.declarationName = name;
     node.data.declarationType = type;
-    return addNode(list, node);
+    return nodeListAddNode(list, node);
 }
 
 inline AST_Node* addAssignmentNode(AST_Node_List* list, String_View name, AST_Node* expr) {
@@ -885,28 +914,28 @@ inline AST_Node* addAssignmentNode(AST_Node_List* list, String_View name, AST_No
     node.type = NODE_ASSIGNMENT;
     node.data.assignmentName = name;
     node.data.assignmentExpr = expr;
-    return addNode(list, node);
+    return nodeListAddNode(list, node);
 }
 
 inline AST_Node* addIntNode(AST_Node_List* list, int value) {
     AST_Node node;
     node.type = NODE_INT;
     node.data.intValue = value;
-    return addNode(list, node);
+    return nodeListAddNode(list, node);
 }
 
 inline AST_Node* addBoolNode(AST_Node_List* list, bool value) {
     AST_Node node;
     node.type = NODE_BOOL;
     node.data.boolValue = value;
-    return addNode(list, node);
+    return nodeListAddNode(list, node);
 }
 
 inline AST_Node* addIdentNode(AST_Node_List* list, String_View name) {
     AST_Node node;
     node.type = NODE_IDENT;
     node.data.identName = name;
-    return addNode(list, node);
+    return nodeListAddNode(list, node);
 }
 
 inline AST_Node* addArgNode(AST_Node_List* list, String_View name, String_View type) {
@@ -914,21 +943,21 @@ inline AST_Node* addArgNode(AST_Node_List* list, String_View name, String_View t
     node.type = NODE_ARGS;
     node.data.argName = name;
     node.data.argType = type;
-    return addNode(list, node);
+    return nodeListAddNode(list, node);
 }
 
 inline AST_Node* addReturnNode(AST_Node_List* list, AST_Node* expr) {
     AST_Node node;
     node.type = NODE_RETURN;
     node.data.returnExpr = expr;
-    return addNode(list, node);
+    return nodeListAddNode(list, node);
 }
 
 inline AST_Node* addElseNode(AST_Node_List* list, AST_Node* scope) {
     AST_Node node;
     node.type = NODE_ELSE;
     node.data.elseScope = scope;
-    return addNode(list, node);
+    return nodeListAddNode(list, node);
 }
 
 inline AST_Node* addControlNode(AST_Node_List* list, Node_Type type, AST_Node* condition, AST_Node* scope) {
@@ -936,7 +965,7 @@ inline AST_Node* addControlNode(AST_Node_List* list, Node_Type type, AST_Node* c
     node.type = type;
     node.data.controlCondition = condition;
     node.data.controlScope = scope;
-    return addNode(list, node);
+    return nodeListAddNode(list, node);
 }
 
 inline AST_Node* addBinaryOpNode(AST_Node_List* list, AST_Node* left, Token token, AST_Node* right) {
@@ -965,7 +994,7 @@ inline AST_Node* addBinaryOpNode(AST_Node_List* list, AST_Node* left, Token toke
     static_assert(NUM_BINOP_TOKENS == 5, "Non-exhaustive cases (addBinaryOpNode)");
     node.data.binaryOpLeft = left;
     node.data.binaryOpRight = right;
-    return addNode(list, node);
+    return nodeListAddNode(list, node);
 }
 
 int getPrecedence(Token_Type type) {
@@ -1031,6 +1060,8 @@ AST_Node* parseStatments(AST_Node_List* list, Lexer* lexer, bool* success);
 AST_Node* parseScope(AST_Node_List* list, Lexer* lexer);
 AST_Node* parseArgs(AST_Node_List* list, Lexer* lexer, bool* success);
 AST_Node* parseFunction(AST_Node_List* list, Lexer* lexer);
+
+Program parseProgram(AST_Node_List* list, Lexer* lexer, bool* success);
 
 AST_Node* parseTerm(AST_Node_List* list, Lexer* lexer) {
     Token token = getToken(lexer);
@@ -1229,7 +1260,7 @@ AST_Node* parseStatements(AST_Node_List* list, Lexer* lexer, bool* success) {
     if (node.data.statementStatement == NULL) {
         *success = false;
     }
-    AST_Node* head = addNode(list, node);
+    AST_Node* head = nodeListAddNode(list, node);
     AST_Node* curr = head;
 
     while (peekToken(lexer).type != TOKEN_RBRACE) {
@@ -1237,7 +1268,7 @@ AST_Node* parseStatements(AST_Node_List* list, Lexer* lexer, bool* success) {
         if (node.data.statementStatement == NULL) {
             *success = false;
         }
-        curr->data.statementNext = addNode(list, node);
+        curr->data.statementNext = nodeListAddNode(list, node);
         curr = curr->data.statementNext;
     }
     getToken(lexer); // Eat the '}'
@@ -1256,7 +1287,7 @@ AST_Node* parseScope(AST_Node_List* list, Lexer* lexer) {
     bool success;
     node.data.scopeStatements = parseStatements(list, lexer, &success);
 
-    return success ? addNode(list, node) : NULL;
+    return success ? nodeListAddNode(list, node) : NULL;
 }
 
 AST_Node* parseArgs(AST_Node_List* list, Lexer* lexer, bool* success) {
@@ -1284,7 +1315,7 @@ AST_Node* parseArgs(AST_Node_List* list, Lexer* lexer, bool* success) {
     }
 
     token = getToken(lexer);
-    if (token.type != TOKEN_INTTYPE_KEYWORD) {
+    if (!isTypeToken(token.type)) {
         printErrorMessage(lexer->fileName, scopeToken(token), "Expected a type name in argument list, got \""SV_FMT"\"", SV_ARG(token.text));
         recoverByEatUntil(lexer, TOKEN_INTTYPE_KEYWORD);
         *success = false;
@@ -1400,7 +1431,26 @@ AST_Node* parseFunction(AST_Node_List* list, Lexer* lexer) {
         success = false;
     }
 
-    return success ? addNode(list, node) : NULL;
+    return success ? nodeListAddNode(list, node) : NULL;
+}
+
+Program parseProgram(AST_Node_List* list, Lexer* lexer, bool* success) {
+    *success = true;
+    Program program = makeProgram();
+
+    Token token = peekToken(lexer);
+    while(token.type != TOKEN_EOF) {
+        AST_Node* function = parseFunction(list, lexer);
+        if (function == NULL) {
+            *success = false;
+        }
+        if (*success) {
+            programAddNode(&program, function);
+        }
+
+        token = peekToken(lexer);
+    }
+    return program;
 }
 
 void printIndented(int indent, char* fmt, ...) {
@@ -1695,9 +1745,10 @@ void addFunctionData(Symbol_Table* table, AST_Node* root, int parentId) {
     addScopeData(table, root->data.functionBody, parentId);
 }
 
-void initSymbolTable(Symbol_Table* table, AST_Node* root) {
-    //Temporary: When we do full programs, this will be different.
-    addFunctionData(table, root, -1);
+void initSymbolTable(Symbol_Table* table, Program program) {
+    for (int i = 0; i < program.length; ++i) {
+        addFunctionData(table, program.nodes[i], -1);
+    }
 }
 
 Scope_Parent_Entry tableLookupParent(Symbol_Table* table, int scopeId) {
@@ -1734,9 +1785,22 @@ Symbol_Lookup_Result tableLookupSymbol(Symbol_Table* table, int scopeId, String_
 // Verification API //
 //////////////////////
 
+bool verifyProgram(Symbol_Table* table, Program program);
 bool verifyFunction(Symbol_Table* table, AST_Node* root);
 bool verifyScope(Symbol_Table* table, AST_Node* root);
 bool verifyExpr(Symbol_Table* table, AST_Node* root, int scopeId);
+
+bool verifyProgram(Symbol_Table* table, Program program) {
+    bool success = true;
+
+    for (int i = 0; i < program.length; ++i) {
+        bool functionSuccess = verifyFunction(table, program.nodes[i]);
+        if (!functionSuccess) {
+            success = false;
+        }
+    }
+    return success;
+}
 
 bool verifyFunction(Symbol_Table* table, AST_Node* root) {
     assert(root->type == NODE_FUNCTION);
@@ -1846,10 +1910,24 @@ bool verifyExpr(Symbol_Table* table, AST_Node* root, int scopeId) {
 ///////////////////////
 
 //TODO: Using String_View for types seems inefficient and sloppy. This really should be an enum for primitive types and reworked to allow for user-defined types.
+
+bool typeCheckProgram(Symbol_Table* table, Program program);
 bool typeCheckFunction(Symbol_Table* table, AST_Node* root);
 bool expectScopeType(Symbol_Table* table, AST_Node* root, String_View expected);
 
 String_View getExprType(Symbol_Table* table, AST_Node* root, int scopeId);
+
+bool typeCheckProgram(Symbol_Table* table, Program program) {
+    bool success = true;
+
+    for (int i = 0; i < program.length; ++i) {
+        bool functionSuccess = typeCheckFunction(table, program.nodes[i]);
+        if (!functionSuccess) {
+            success = false;
+        }
+    }
+    return success;
+}
 
 bool typeCheckFunction(Symbol_Table* table, AST_Node* root) {
     assert(root->type == NODE_FUNCTION);
@@ -1989,6 +2067,7 @@ void emitStatements(int indent, FILE* file, AST_Node* root);
 void emitScope(int leadingIndent, int indent, FILE* file, AST_Node* root);
 void emitArgs(FILE* file, AST_Node* root);
 void emitFunction(FILE* file, AST_Node* root);
+void emitProgram(FILE* file, Program program);
 
 void emitTerm(FILE* file, AST_Node* root) {
     switch (root->type) {
@@ -2163,6 +2242,20 @@ void emitFunction(FILE* file, AST_Node* root) {
     emitScope(0, 0, file, root->data.functionBody);
 }
 
+void emitProgram(FILE* file, Program program) {
+    tryFPuts("#include <stdbool.h>\n\n", file); // Needed for bool types in the emitted C program
+
+    if (program.length == 0) {
+        return;
+    }
+
+    emitFunction(file, program.nodes[0]);
+    for (int i = 1; i < program.length; ++i) {
+        tryFPuts("\n", file);
+        emitFunction(file, program.nodes[i]);
+    }
+}
+
 // Read in file simple.lcl - DONE
 // Have an iterator lexer - DONE
 // Write a simple grammar - DONE* (Will be expanded)
@@ -2175,29 +2268,32 @@ int main() {
     char* code = readEntireFile(fileName);
     Lexer lexer = makeLexer(code, fileName);
     AST_Node_List list = makeNodeList(512);
-    AST_Node* function = parseFunction(&list, &lexer);
-    if (function == NULL) {
+
+    bool parseSuccess;
+    Program program = parseProgram(&list, &lexer, &parseSuccess);
+    if (!parseSuccess) {
         return 1;
     }
-    printAST(function);
+    printProgram(program);
+    
     Symbol_Table table = makeSymbolTable(8);
-    initSymbolTable(&table, function);
+    initSymbolTable(&table, program);
 
     printf("\n\n\n");
     printSymbolTable(table);
     printf("\n\n\n");
 
-    bool verified = verifyFunction(&table, function);
+    bool verified = verifyProgram(&table, program);
     if (!verified) {
         return 1;
     }
 
-    bool typeChecked = typeCheckFunction(&table, function);
+    bool typeChecked = typeCheckProgram(&table, program);
     if (!typeChecked) {
         return 1;
     }
 
     FILE* output = tryFOpen("examples/simple.c", "wb");
-    emitFunction(output, function);
+    emitProgram(output, program);
     return 0;
 }

@@ -13,3 +13,11 @@ main :: func() {
         a = 2;
     }
 }
+
+
+func2 :: func(bool_val: bool, int_val: int) -> int { 
+    if bool_val {
+        int_val = int_val + 1;
+    }
+    return int_val;
+}
