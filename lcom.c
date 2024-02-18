@@ -739,9 +739,77 @@ typedef enum {
     // Identifiers
     NODE_IDENT,
 
-    //Used for static asserts
+    // Used for static asserts
     NODE_COUNT,
 } Node_Type;
+
+typedef enum {
+    TYPE_INT,
+    TYPE_BOOL,
+    TYPE_USER,
+    TYPE_UNIT,
+
+    TYPE_UNKNOWN, // Currently used for type checking errors, although could be used for type inference in the future.
+} Type_Id;
+
+typedef struct {
+    String_View typeName;
+    Type_Id id;
+
+    // Used for array types. -1 if the type is not an array.
+    int size;
+} Type;
+
+Type getTypeFromSv(String_View sv) {
+    Type type;
+    type.typeName = sv;
+    if (svEqualsCStr(sv, "int")) {
+        type.id = TYPE_INT;
+    }
+    else if (svEqualsCStr(sv, "bool")) {
+        type.id = TYPE_BOOL;
+    }
+    else if (svEqualsCStr(sv, "unit")) {
+        type.id = TYPE_UNIT;
+    }
+    else {
+        type.id = TYPE_USER;
+    }
+    type.size = -1; //TODO: Support array types
+    return type;    
+}
+
+inline bool typeEquals(Type t1, Type t2) {
+    return t1.id == t2.id && t1.size == t2.size;
+}
+
+inline Type makeType(Type_Id id) {
+    switch (id) {
+        case TYPE_UNIT:
+            return (Type){
+                .typeName = svFromCStr("unit"),
+                .id = TYPE_UNIT,
+                .size = -1,
+            };
+
+        case TYPE_BOOL:
+            return (Type){
+                .typeName = svFromCStr("bool"),
+                .id = TYPE_BOOL,
+                .size = -1,
+            };
+
+        case TYPE_INT:
+            return (Type){
+                .typeName = svFromCStr("int"),
+                .id = TYPE_INT,
+                .size = -1,
+            };
+
+        case TYPE_UNKNOWN:
+            return (Type){.id = TYPE_UNKNOWN};
+    }
+}
 
 typedef struct AST_Node AST_Node;
 
@@ -750,12 +818,12 @@ typedef union {
         String_View functionName;
         AST_Node* functionArgs;
         AST_Node* functionBody;
-        String_View functionRetType;
+        Type functionRetType;
     };
     // Represents a linked list of function arguments.
     struct {                 // NODE_ARGS
         String_View argName;
-        String_View argType;
+        Type argType;
         AST_Node* argNext;
     };
     struct {                 // NODE_SCOPE
@@ -781,7 +849,7 @@ typedef union {
     AST_Node* returnExpr;       // NODE_RETURN
     struct {                 // NODE_DELCARATION
         String_View declarationName;
-        String_View declarationType;
+        Type declarationType;
     };
     struct {                 // NODE_ASSIGNMENT
         String_View assignmentName;
@@ -905,7 +973,7 @@ inline AST_Node* addDeclarationNode(AST_Node_List* list, String_View name, Strin
     AST_Node node;
     node.type = NODE_DECLARATION;
     node.data.declarationName = name;
-    node.data.declarationType = type;
+    node.data.declarationType = getTypeFromSv(type);
     return nodeListAddNode(list, node);
 }
 
@@ -942,7 +1010,7 @@ inline AST_Node* addArgNode(AST_Node_List* list, String_View name, String_View t
     AST_Node node;
     node.type = NODE_ARGS;
     node.data.argName = name;
-    node.data.argType = type;
+    node.data.argType = getTypeFromSv(type);
     return nodeListAddNode(list, node);
 }
 
@@ -1317,7 +1385,7 @@ AST_Node* parseArgs(AST_Node_List* list, Lexer* lexer, bool* success) {
     token = getToken(lexer);
     if (!isTypeToken(token.type)) {
         printErrorMessage(lexer->fileName, scopeToken(token), "Expected a type name in argument list, got \""SV_FMT"\"", SV_ARG(token.text));
-        recoverByEatUntil(lexer, TOKEN_INTTYPE_KEYWORD);
+        recoverByEatUntil(lexer, TOKEN_INTTYPE_KEYWORD); // TODO: Eat until any type keyword
         *success = false;
     }
     String_View type = token.text;
@@ -1348,9 +1416,9 @@ AST_Node* parseArgs(AST_Node_List* list, Lexer* lexer, bool* success) {
         }
 
         token = getToken(lexer);
-        if (token.type != TOKEN_INTTYPE_KEYWORD) {
+        if (!isTypeToken(token.type)) {
             printErrorMessage(lexer->fileName, scopeToken(token), "Expected a type name in argument list, got \""SV_FMT"\"", SV_ARG(token.text));
-            recoverByEatUntil(lexer, TOKEN_INTTYPE_KEYWORD);
+            recoverByEatUntil(lexer, TOKEN_INTTYPE_KEYWORD); // TODO: Eat until any type keyword
             *success = false;
         }
         type = token.text;
@@ -1413,11 +1481,11 @@ AST_Node* parseFunction(AST_Node_List* list, Lexer* lexer) {
             recoverByEatUpTo(lexer, TOKEN_LBRACE);
             success = false;
         }
-        node.data.functionRetType = token.text;
+        node.data.functionRetType = getTypeFromSv(token.text);
         token = peekToken(lexer);
     }
     else {
-        node.data.functionRetType = svFromCStr("unit");
+        node.data.functionRetType = makeType(TYPE_UNIT);
     }
 
     if (token.type != TOKEN_LBRACE) {
@@ -1466,7 +1534,7 @@ void printIndented(int indent, char* fmt, ...) {
 void printASTIndented(int indent, AST_Node* root) {
     switch (root->type) {
         case NODE_FUNCTION: {
-            printIndented(indent, "type=FUNCTION, name="SV_FMT", rettype="SV_FMT", args=", SV_ARG(root->data.functionName), SV_ARG(root->data.functionRetType));
+            printIndented(indent, "node_type=FUNCTION, name="SV_FMT", rettype="SV_FMT", args=", SV_ARG(root->data.functionName), SV_ARG(root->data.functionRetType.typeName));
             if (root->data.functionArgs == NULL) {
                 printf("NONE, body=");
             }
@@ -1486,15 +1554,15 @@ void printASTIndented(int indent, AST_Node* root) {
             break;
         }
         case NODE_ARGS: {
-            printIndented(indent, "name="SV_FMT", type="SV_FMT"\n", SV_ARG(root->data.argName), SV_ARG(root->data.argType));
+            printIndented(indent, "name="SV_FMT", type="SV_FMT"\n", SV_ARG(root->data.argName), SV_ARG(root->data.argType.typeName));
             while (root->data.argNext != NULL) {
                 root = root->data.argNext;
-                printIndented(indent, "name="SV_FMT", type="SV_FMT"\n", SV_ARG(root->data.argName), SV_ARG(root->data.argType));
+                printIndented(indent, "name="SV_FMT", type="SV_FMT"\n", SV_ARG(root->data.argName), SV_ARG(root->data.argType.typeName));
             }
             break;
         }
         case NODE_SCOPE: {
-            printIndented(indent, "type=SCOPE, statements=");
+            printIndented(indent, "node_type=SCOPE, statements=");
             if (root->data.scopeStatements == NULL) {
                 printf("NONE\n");
             }
@@ -1514,7 +1582,7 @@ void printASTIndented(int indent, AST_Node* root) {
             break;
         }
         case NODE_RETURN: {
-            printIndented(indent, "type=RETURN, expr=");
+            printIndented(indent, "node_type=RETURN, expr=");
             if (root->data.returnExpr == NULL) {
                 printf("NONE\n");
             }
@@ -1526,17 +1594,17 @@ void printASTIndented(int indent, AST_Node* root) {
             break;
         }
         case NODE_DECLARATION: {
-            printIndented(indent, "type=DECLARATION, name="SV_FMT", type="SV_FMT"\n", SV_ARG(root->data.declarationName), SV_ARG(root->data.declarationType));
+            printIndented(indent, "node_type=DECLARATION, name="SV_FMT", type="SV_FMT"\n", SV_ARG(root->data.declarationName), SV_ARG(root->data.declarationType.typeName));
             break;
         }
         case NODE_ASSIGNMENT: {
-            printIndented(indent, "type=ASSIGNMENT, name="SV_FMT", expr=(\n", SV_ARG(root->data.declarationName));
+            printIndented(indent, "node_type=ASSIGNMENT, name="SV_FMT", expr=(\n", SV_ARG(root->data.declarationName));
             printASTIndented(indent + 1, root->data.assignmentExpr);
             printIndented(indent, ")\n");
             break;
         }
         case NODE_PLUS: {
-            printIndented(indent, "type=PLUS, left=(\n");
+            printIndented(indent, "node_type=PLUS, left=(\n");
             printASTIndented(indent + 1, root->data.binaryOpLeft);
             printIndented(indent, "), right=(\n");
             printASTIndented(indent + 1, root->data.binaryOpRight);
@@ -1544,7 +1612,7 @@ void printASTIndented(int indent, AST_Node* root) {
             break;
         }
         case NODE_MINUS: {
-            printIndented(indent, "type=MINUS, left=(\n");
+            printIndented(indent, "node_type=MINUS, left=(\n");
             printASTIndented(indent + 1, root->data.binaryOpLeft);
             printIndented(indent, "), right=(\n");
             printASTIndented(indent + 1, root->data.binaryOpRight);
@@ -1552,7 +1620,7 @@ void printASTIndented(int indent, AST_Node* root) {
             break;
         }
         case NODE_TIMES: {
-            printIndented(indent, "type=TIMES, left=(\n");
+            printIndented(indent, "node_type=TIMES, left=(\n");
             printASTIndented(indent + 1, root->data.binaryOpLeft);
             printIndented(indent, "), right=(\n");
             printASTIndented(indent + 1, root->data.binaryOpRight);
@@ -1560,7 +1628,7 @@ void printASTIndented(int indent, AST_Node* root) {
             break;
         }
         case NODE_DIVIDE: {
-            printIndented(indent, "type=DIVIDE, left=(\n");
+            printIndented(indent, "node_type=DIVIDE, left=(\n");
             printASTIndented(indent + 1, root->data.binaryOpLeft);
             printIndented(indent, "), right=(\n");
             printASTIndented(indent + 1, root->data.binaryOpRight);
@@ -1568,7 +1636,7 @@ void printASTIndented(int indent, AST_Node* root) {
             break;
         }
         case NODE_IS_EQUAL: {
-            printIndented(indent, "type=IS_EQUAL, left=(\n");
+            printIndented(indent, "node_type=IS_EQUAL, left=(\n");
             printASTIndented(indent + 1, root->data.binaryOpLeft);
             printIndented(indent, "), right=(\n");
             printASTIndented(indent + 1, root->data.binaryOpRight);
@@ -1576,7 +1644,7 @@ void printASTIndented(int indent, AST_Node* root) {
             break;
         }
         case NODE_IF: {
-            printIndented(indent, "type=IF, condition=(\n");
+            printIndented(indent, "node_type=IF, condition=(\n");
             printASTIndented(indent + 1, root->data.controlCondition);
             printIndented(indent, "), body=(\n");
             printASTIndented(indent + 1, root->data.controlScope);
@@ -1584,13 +1652,13 @@ void printASTIndented(int indent, AST_Node* root) {
             break;
         }
         case NODE_ELSE: {
-            printIndented(indent, "type=ELSE, body=(\n");
+            printIndented(indent, "node_type=ELSE, body=(\n");
             printASTIndented(indent + 1, root->data.elseScope);
             printIndented(indent, ")\n");
             break;
         }
         case NODE_WHILE: {
-            printIndented(indent, "type=WHILE, condition=(\n");
+            printIndented(indent, "node_type=WHILE, condition=(\n");
             printASTIndented(indent + 1, root->data.controlCondition);
             printIndented(indent, "), body=(\n");
             printASTIndented(indent + 1, root->data.controlScope);
@@ -1598,15 +1666,15 @@ void printASTIndented(int indent, AST_Node* root) {
             break;
         }
         case NODE_INT: {
-            printIndented(indent, "type=INT, value=%d\n", root->data.intValue);
+            printIndented(indent, "node_type=INT, value=%d\n", root->data.intValue);
             break;
         }
         case NODE_BOOL: {
-            printIndented(indent, "type=BOOL, value=%d\n", root->data.boolValue);
+            printIndented(indent, "node_type=BOOL, value=%d\n", root->data.boolValue);
             break;
         }
         case NODE_IDENT: {
-            printIndented(indent, "type=IDENT, name="SV_FMT"\n", SV_ARG(root->data.identName));
+            printIndented(indent, "node_type=IDENT, name="SV_FMT"\n", SV_ARG(root->data.identName));
             break;
         }
     }
@@ -1626,7 +1694,7 @@ inline void printAST(AST_Node* root) {
 typedef struct {
     int scopeId;
     String_View name;
-    String_View type;
+    Type type;
 } Symbol_Entry;
 
 typedef struct {
@@ -1663,7 +1731,7 @@ void printSymbolTable(Symbol_Table table) {
     printf("Symbols:\n");
     for (int i = 0; i < table.symbolsLength; ++i) {
         Symbol_Entry entry = table.symbols[i];
-        printf("Scope id: %d, Name: "SV_FMT", Type: "SV_FMT"\n", entry.scopeId, SV_ARG(entry.name), SV_ARG(entry.type));
+        printf("Scope id: %d, Name: "SV_FMT", Type: "SV_FMT"\n", entry.scopeId, SV_ARG(entry.name), SV_ARG(entry.type.typeName));
     }
 
     printf("--------------------------------------------------\n");
@@ -1675,7 +1743,7 @@ void printSymbolTable(Symbol_Table table) {
     }
 }
 
-void addSymbol(Symbol_Table* table, int scopeId, String_View name, String_View type) {
+void addSymbol(Symbol_Table* table, int scopeId, String_View name, Type type) {
     if (table->symbolsLength == table->symbolsCapacity) {
         table->symbolsCapacity *= 2;
         table->symbols = realloc(table->symbols, table->symbolsCapacity * sizeof(Symbol_Entry));
@@ -1913,9 +1981,9 @@ bool verifyExpr(Symbol_Table* table, AST_Node* root, int scopeId) {
 
 bool typeCheckProgram(Symbol_Table* table, Program program);
 bool typeCheckFunction(Symbol_Table* table, AST_Node* root);
-bool expectScopeType(Symbol_Table* table, AST_Node* root, String_View expected);
+bool expectScopeType(Symbol_Table* table, AST_Node* root, Type expected);
 
-String_View getExprType(Symbol_Table* table, AST_Node* root, int scopeId);
+Type getExprType(Symbol_Table* table, AST_Node* root, int scopeId);
 
 bool typeCheckProgram(Symbol_Table* table, Program program) {
     bool success = true;
@@ -1935,7 +2003,7 @@ bool typeCheckFunction(Symbol_Table* table, AST_Node* root) {
     return expectScopeType(table, root->data.functionBody, root->data.functionRetType);
 }
 
-bool expectScopeType(Symbol_Table* table, AST_Node* root, String_View expected) {
+bool expectScopeType(Symbol_Table* table, AST_Node* root, Type expected) {
     bool success = true;
     assert(root->type == NODE_SCOPE);
 
@@ -1945,13 +2013,14 @@ bool expectScopeType(Symbol_Table* table, AST_Node* root, String_View expected) 
 
         switch (statement->type) {
             case NODE_RETURN: {
-                String_View exprType = getExprType(table, statement->data.returnExpr, root->data.scopeId);
-                if (svIsEmpty(exprType)) {
+                Type exprType = getExprType(table, statement->data.returnExpr, root->data.scopeId);
+                if (exprType.id == TYPE_UNKNOWN) {
                     fprintf(stderr, "ERROR! Could not evaluate type of return expression.\n");
                     success = false;
                 }
-                if (!svEquals(exprType, expected)) {
-                    fprintf(stderr, "ERROR! Type mismatch. Expected "SV_FMT", got "SV_FMT"\n", SV_ARG(expected), SV_ARG(exprType));
+                if (!typeEquals(exprType, expected)) {
+                    printf("Ids: %d; %d, Sizes: %d; %d\n", exprType.id, expected.id, exprType.size, expected.size);
+                    fprintf(stderr, "ERROR! Type mismatch. Expected "SV_FMT", got "SV_FMT"\n", SV_ARG(expected.typeName), SV_ARG(exprType.typeName));
                     success = false;
                 }
                 break;
@@ -1959,42 +2028,42 @@ bool expectScopeType(Symbol_Table* table, AST_Node* root, String_View expected) 
             case NODE_ASSIGNMENT: {
                 Symbol_Lookup_Result var = tableLookupSymbol(table, root->data.scopeId, statement->data.assignmentName);
                 assert(var.exists);
-                String_View varType = var.entry.type;
-                String_View exprType = getExprType(table, statement->data.assignmentExpr, root->data.scopeId);
-                if (svIsEmpty(exprType)) {
+                Type varType = var.entry.type;
+                Type exprType = getExprType(table, statement->data.assignmentExpr, root->data.scopeId);
+                if (exprType.id == TYPE_UNKNOWN) {
                     //TODO: IMPROVE THIS ERROR MESSAGE!!!!! Lexical scoping of AST_Nodes
                     fprintf(stderr, "ERROR! Could not evalutate the right hand side of assignment\n");
                     success = false;
                 }
-                if (!svEquals(varType, exprType)) {
-                    fprintf(stderr, "ERROR! Type mismatch. Expected "SV_FMT", got "SV_FMT"\n", SV_ARG(varType), SV_ARG(exprType));
+                if (!typeEquals(varType, exprType)) {
+                    fprintf(stderr, "ERROR! Type mismatch. Expected "SV_FMT", got "SV_FMT"\n", SV_ARG(varType.typeName), SV_ARG(exprType.typeName));
                     success = false;
                 }
                 break;
             }
             case NODE_IF:
             case NODE_WHILE: {
-                String_View conditionType = getExprType(table, statement->data.controlCondition, root->data.scopeId);
-                if (svIsEmpty(conditionType)) {
+                Type conditionType = getExprType(table, statement->data.controlCondition, root->data.scopeId);
+                if (conditionType.id == TYPE_UNKNOWN) {
                     fprintf(stderr, "ERROR! Could not evaluate type of control condition\n");
                     success = false;
                 }
-                if (!svEqualsCStr(conditionType, "bool")) {
-                    fprintf(stderr, "ERROR! Type mismatch. Expected bool, got "SV_FMT"\n", SV_ARG(conditionType));
+                if (!typeEquals(conditionType, makeType(TYPE_BOOL))) {
+                    fprintf(stderr, "ERROR! Type mismatch. Expected bool, got "SV_FMT"\n", SV_ARG(conditionType.typeName));
                     success = false;
                 }
 
-                expectScopeType(table, statement->data.controlScope, svFromCStr("unit"));
+                expectScopeType(table, statement->data.controlScope, makeType(TYPE_UNIT));
                 break;
             }
             case NODE_ELSE: {
-                if (!expectScopeType(table, statement->data.elseScope, svFromCStr("unit"))) {
+                if (!expectScopeType(table, statement->data.elseScope, makeType(TYPE_UNIT))) {
                     success = false;
                 }
                 break;
             }
             case NODE_SCOPE: {
-                if (!expectScopeType(table, statements->data.statementStatement, svFromCStr("unit"))) {
+                if (!expectScopeType(table, statements->data.statementStatement, makeType(TYPE_UNIT))) {
                     success = false;
                 }
                 break;
@@ -2006,13 +2075,13 @@ bool expectScopeType(Symbol_Table* table, AST_Node* root, String_View expected) 
     return success;
 }
 
-String_View getExprType(Symbol_Table* table, AST_Node* root, int scopeId) {
+Type getExprType(Symbol_Table* table, AST_Node* root, int scopeId) {
     switch (root->type) {
         case NODE_INT: {
-            return svFromCStr("int");
+            return makeType(TYPE_INT);
         }
         case NODE_BOOL: {
-            return svFromCStr("bool");
+            return makeType(TYPE_BOOL);
         }
         case NODE_IDENT: {
             Symbol_Lookup_Result result = tableLookupSymbol(table, scopeId, root->data.identName);
@@ -2023,30 +2092,30 @@ String_View getExprType(Symbol_Table* table, AST_Node* root, int scopeId) {
         case NODE_MINUS:
         case NODE_TIMES:
         case NODE_DIVIDE: {
-            String_View left = getExprType(table, root->data.binaryOpLeft, scopeId);
-            String_View right = getExprType(table, root->data.binaryOpRight, scopeId);
-            if (svIsEmpty(left) || svIsEmpty(right)) {
+            Type left = getExprType(table, root->data.binaryOpLeft, scopeId);
+            Type right = getExprType(table, root->data.binaryOpRight, scopeId);
+            if (left.id == TYPE_UNKNOWN || right.id == TYPE_UNKNOWN) {
                 fprintf(stderr, "ERROR! Could not evaluate expression type\n");
-                return svFromCStr("");
+                return makeType(TYPE_UNKNOWN);
             }
-            if (!svEquals(left, right)) {
-                fprintf(stderr, "ERROR! Type mismatch. Left is "SV_FMT", right is "SV_FMT"\n", SV_ARG(left), SV_ARG(right));
-                return svFromCStr("");
+            if (!typeEquals(left, right)) {
+                fprintf(stderr, "ERROR! Type mismatch. Left is "SV_FMT", right is "SV_FMT"\n", SV_ARG(left.typeName), SV_ARG(right.typeName));
+                return makeType(TYPE_UNKNOWN);
             }
             return left;
         }
         case NODE_IS_EQUAL: {
-            String_View left = getExprType(table, root->data.binaryOpLeft, scopeId);
-            String_View right = getExprType(table, root->data.binaryOpRight, scopeId);
-            if (svIsEmpty(left) || svIsEmpty(right)) {
+            Type left = getExprType(table, root->data.binaryOpLeft, scopeId);
+            Type right = getExprType(table, root->data.binaryOpRight, scopeId);
+            if (left.id == TYPE_UNKNOWN || right.id == TYPE_UNKNOWN) {
                 fprintf(stderr, "ERROR! Could not evaluate expression type\n");
-                return svFromCStr("");
+                return makeType(TYPE_UNKNOWN);
             }
-            if (!svEquals(left, right)) {
-                fprintf(stderr, "ERROR! Type mismatch. Left is "SV_FMT", right is "SV_FMT"\n", SV_ARG(left), SV_ARG(right));
-                return svFromCStr("");
+            if (!typeEquals(left, right)) {
+                fprintf(stderr, "ERROR! Type mismatch. Left is "SV_FMT", right is "SV_FMT"\n", SV_ARG(left.typeName), SV_ARG(right.typeName));
+                return makeType(TYPE_UNKNOWN);
             }
-            return svFromCStr("bool");
+            return makeType(TYPE_BOOL);
         }
         default:
             printf("Unknown expression node: %d\n", root->type);
@@ -2148,7 +2217,7 @@ void emitStatement(int indent, FILE* file, AST_Node* root) {
             break;
         }
         case NODE_DECLARATION: {
-            tryFPrintfIndented(indent, file, SV_FMT" "SV_FMT, SV_ARG(root->data.declarationType), SV_ARG(root->data.declarationName));
+            tryFPrintfIndented(indent, file, SV_FMT" "SV_FMT, SV_ARG(root->data.declarationType.typeName), SV_ARG(root->data.declarationName));
             tryFPuts(";\n", file);
             break;
         }
@@ -2215,10 +2284,10 @@ void emitArgs(FILE* file, AST_Node* root) {
     }
 
     tryFPuts("(", file);
-    tryFPrintf(file, SV_FMT" "SV_FMT, SV_ARG(root->data.argType), SV_ARG(root->data.argName));
+    tryFPrintf(file, SV_FMT" "SV_FMT, SV_ARG(root->data.argType.typeName), SV_ARG(root->data.argName));
     root = root->data.argNext;
     while (root != NULL) {
-        tryFPrintf(file, ", "SV_FMT" "SV_FMT, SV_ARG(root->data.argType), SV_ARG(root->data.argName));
+        tryFPrintf(file, ", "SV_FMT" "SV_FMT, SV_ARG(root->data.argType.typeName), SV_ARG(root->data.argName));
         root = root->data.argNext;
     }
     tryFPuts(")", file);
@@ -2230,11 +2299,11 @@ void emitFunction(FILE* file, AST_Node* root) {
     if (svEqualsCStr(root->data.functionName, "main")) {
         tryFPuts("int ", file);
     }
-    else if (svEqualsCStr(root->data.functionRetType, "unit")) {
+    else if (svEqualsCStr(root->data.functionRetType.typeName, "unit")) {
         tryFPuts("void ", file);
     }
     else {
-        tryFPrintf(file, SV_FMT" ", SV_ARG(root->data.functionRetType));
+        tryFPrintf(file, SV_FMT" ", SV_ARG(root->data.functionRetType.typeName));
     }
     tryFPrintf(file, SV_FMT, SV_ARG(root->data.functionName));
     emitArgs(file, root->data.functionArgs);

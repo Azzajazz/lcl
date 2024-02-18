@@ -4,6 +4,7 @@
 - Improvements on error messages (on hold until the language is useable)
 
 ## Feature adds
+- Arrays
 - Function calls
 - Data structure definitions
 
@@ -14,4 +15,3 @@ None
 - Ring buffer in lexer so that peeked tokens aren't processed twice.
 - Hashmap for scope variable lookup
 - Reduce allocations on sanitizer
-- Primitive type IDs to avoid string comparisons
