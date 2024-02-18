@@ -4,7 +4,7 @@
 - Improvements on error messages (on hold until the language is useable)
 
 ## Feature adds
-- Arrays
+- Array access
 - Function calls
 - Data structure definitions
 

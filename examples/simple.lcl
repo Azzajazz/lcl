@@ -1,17 +1,5 @@
 main :: func() {
-    a: int;
-    a = 1;
-    if a == 1 {
-        b: int;
-        {
-            c: bool;
-            b = 2;
-        }
-    }
-    else {
-        c: bool;
-        a = 2;
-    }
+    a: [8] bool;
 }
 
 
