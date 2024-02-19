@@ -2,6 +2,8 @@
 
 int main() {
     bool a[8];
+    bool b;
+    b = a[0];
 }
 
 int func2(bool bool_val, int int_val) {

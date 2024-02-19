@@ -750,6 +750,9 @@ typedef enum {
     NODE_TIMES,
     NODE_DIVIDE,
 
+    // Other expression nodes
+    NODE_ARRAY_ACCESS,
+
     // Boolean operators
     NODE_IS_EQUAL,
 
@@ -865,6 +868,10 @@ typedef union {
     struct {                 // Binary operations (e.g. NODE_PLUS, NODE_MINUS, ...)
         AST_Node* binaryOpLeft;
         AST_Node* binaryOpRight;
+    };
+    struct {                 // NODE_ARRAY_ACCESS
+        String_View accessArrayName;
+        AST_Node* accessIndex;
     };
     struct {                 // Control statements (NODE_IF, NODE_WHILE)
         AST_Node* controlCondition;
@@ -1092,6 +1099,14 @@ inline AST_Node* addBinaryOpNode(AST_Node_List* list, AST_Node* left, Token toke
     return nodeListAddNode(list, node);
 }
 
+AST_Node* addArrayAccessNode(AST_Node_List* list, String_View arrayName, AST_Node* index) {
+    AST_Node node;
+    node.type = NODE_ARRAY_ACCESS;
+    node.data.accessArrayName = arrayName;
+    node.data.accessIndex = index;
+    return nodeListAddNode(list, node);
+}
+
 int getPrecedence(Token_Type type) {
     switch (type) {
         case TOKEN_DOUBLE_EQUALS:
@@ -1167,8 +1182,7 @@ Type parseType(Lexer* lexer) {
     if (token.type == TOKEN_LBRACKET) {
         token = getToken(lexer);
         if (token.type != TOKEN_INT) {
-            printErrorMessage(lexer->fileName, scopeToken(token), "Expected an integer size in array type, got \""SV_FMT"\"", SV_ARG(token.text));
-            recoverByEatUntil(lexer, TOKEN_RBRACKET);
+            printErrorMessage(lexer->fileName, scopeToken(token), "Expected an integer in array type, got \""SV_FMT"\"", SV_ARG(token.text));
         }
         type.size = token.intValue;
 
@@ -1219,7 +1233,23 @@ AST_Node* parseTerm(AST_Node_List* list, Lexer* lexer) {
         case TOKEN_BOOL:
             return addBoolNode(list, token.boolValue);
         case TOKEN_IDENT:
-            return addIdentNode(list, token.text);
+            String_View name = token.text;
+
+            token = peekToken(lexer);
+            if (token.type == TOKEN_LBRACKET) {
+                // This is an array access
+                getToken(lexer); // Eat the '['
+
+                AST_Node* index = parseExpr(list, lexer, -1);
+
+                token = getToken(lexer);
+                if (token.type != TOKEN_RBRACKET) {
+                    printErrorMessage(lexer->fileName, scopeToken(token), "Expected a \"]\" in array access, but got \""SV_FMT"\"", SV_ARG(token.text)); 
+                    recoverByEatUpTo(lexer, TOKEN_SEMICOLON);
+                }
+                return addArrayAccessNode(list, name, index);
+            }
+            return addIdentNode(list, name);
         default:
             printErrorMessage(lexer->fileName, scopeToken(token), "Expected an integer or identifier, but got \""SV_FMT"\"", SV_ARG(token.text));
             recoverByEatUpTo(lexer, TOKEN_SEMICOLON);
@@ -1288,6 +1318,7 @@ AST_Node* parseExpr(AST_Node_List* list, Lexer* lexer, int precedence) {
     return term;
 }
 
+//TODO: Refactor this to allow for expandability
 AST_Node* parseStatement(AST_Node_List* list, Lexer* lexer) {
     Token token = peekToken(lexer);
     switch (token.type) {
@@ -1718,6 +1749,12 @@ void printASTIndented(int indent, AST_Node* root) {
             printIndented(indent, ")\n");
             break;
         }
+        case NODE_ARRAY_ACCESS: {
+            printIndented(indent, "node_type=ARRAY_ACCESS, array="SV_FMT", index = (\n", SV_ARG(root->data.accessArrayName));
+            printASTIndented(indent + 1, root->data.accessIndex);
+            printIndented(indent, ")\n");
+            break;
+        }
         case NODE_IF: {
             printIndented(indent, "node_type=IF, condition=(\n");
             printASTIndented(indent + 1, root->data.controlCondition);
@@ -1753,7 +1790,7 @@ void printASTIndented(int indent, AST_Node* root) {
             break;
         }
     }
-    static_assert(NODE_COUNT == 18, "Non-exhaustive cases (printASTIndented)");
+    static_assert(NODE_COUNT == 19, "Non-exhaustive cases (printASTIndented)");
 }
 
 inline void printAST(AST_Node* root) {
@@ -2192,6 +2229,14 @@ Type getExprType(Symbol_Table* table, AST_Node* root, int scopeId) {
             }
             return makeType(TYPE_BOOL);
         }
+        case NODE_ARRAY_ACCESS: {
+            Symbol_Lookup_Result result = tableLookupSymbol(table, scopeId, root->data.accessArrayName);
+            assert(result.exists);
+            assert(result.entry.type.size >= 0);
+            Type elemType = result.entry.type;
+            elemType.size = -1;
+            return elemType;
+        }
         default:
             printf("Unknown expression node: %d\n", root->type);
             assert(false && "Not an expression type or non-exhaustive cases (getExprType)");
@@ -2225,6 +2270,12 @@ void emitTerm(FILE* file, AST_Node* root) {
         }
         case NODE_IDENT: {
             tryFPrintf(file, SV_FMT, SV_ARG(root->data.identName));
+            break;
+        }
+        case NODE_ARRAY_ACCESS: {
+            tryFPrintf(file, SV_FMT"[", SV_ARG(root->data.accessArrayName));
+            emitExpr(file, root->data.accessIndex, -1);
+            tryFPuts("]", file);
             break;
         }
         default:
